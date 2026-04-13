@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#06060c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>SnapQ Talk — You Are The Actor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700;800;900&family=Playfair+Display:wght@700;800;900&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #06060c; overflow-x: hidden; -webkit-tap-highlight-color: transparent; }
+    #root { min-height: 100vh; }
+    /* Loading screen */
+    #loading { position: fixed; inset: 0; background: #06060c; display: flex; align-items: center; justify-content: center; z-index: 9999; flex-direction: column; gap: 12px; }
+    #loading h1 { font-family: 'Playfair Display', serif; font-size: 32px; font-weight: 900; background: linear-gradient(135deg, #f59e0b, #ef4444); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    #loading p { color: #64748b; font-size: 12px; font-family: 'Noto Sans KR', sans-serif; }
+    .ld-spinner { width: 24px; height: 24px; border: 2px solid rgba(245,158,11,0.2); border-top-color: #f59e0b; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="ld-spinner"></div>
+    <h1>SnapQ Talk</h1>
+    <p>Loading...</p>
+  </div>
+  <div id="root"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+
+/* ═══════════════════════════════════════════════════
+   SnapQ Talk v7 — 통합 완전체
+   국적→진출국→스튜디오→일상/전문가 시리즈
+   대본→퍼즐→리허설→촬영 + 전문 리스닝
+   ═══════════════════════════════════════════════════ */
+
+const F="'Noto Sans KR',sans-serif";
+
+// ── TTS: Samsung Galaxy Android Fix ──
+let voicesReady = false;
+let retryCount = 0;
+
+function loadVoices() {
+  if (!window.speechSynthesis) return;
+  const v = window.speechSynthesis.getVoices();
+  if (v.length > 0) { voicesReady = true; return; }
+  if (retryCount < 10) {
+    retryCount++;
+    setTimeout(loadVoices, 200);
+  }
+}
+if (window.speechSynthesis) {
+  window.speechSynthesis.onvoiceschanged = () => { voicesReady = true; };
+  loadVoices();
+}
+
+function say(t, l="en-US", r=0.85) {
+  return new Promise(resolve => {
+    if (!window.speechSynthesis) { resolve(); return; }
+    window.speechSynthesis.cancel();
+    
+    const doSpeak = () => {
+      const u = new SpeechSynthesisUtterance(t);
+      u.lang = l;
+      u.rate = r;
+      u.volume = 1;
+      // Find matching voice (critical for Samsung)
+      const voices = window.speechSynthesis.getVoices();
+      const langCode = l.split("-")[0];
+      const exactMatch = voices.find(v => v.lang === l);
+      const partialMatch = voices.find(v => v.lang.startsWith(langCode));
+      if (exactMatch) u.voice = exactMatch;
+      else if (partialMatch) u.voice = partialMatch;
+      
+      u.onend = resolve;
+      u.onerror = resolve;
+      // Samsung fix: sometimes speak doesn't fire, timeout fallback
+      const timeout = setTimeout(resolve, Math.max(3000, t.length * 150));
+      u.onend = () => { clearTimeout(timeout); resolve(); };
+      u.onerror = () => { clearTimeout(timeout); resolve(); };
+      
+      window.speechSynthesis.speak(u);
+      
+      // Samsung Chrome bug: speech pauses after ~15sec, this keeps it alive
+      const keepAlive = setInterval(() => {
+        if (!window.speechSynthesis.speaking) { clearInterval(keepAlive); return; }
+        window.speechSynthesis.pause();
+        window.speechSynthesis.resume();
+      }, 10000);
+      u.onend = () => { clearInterval(keepAlive); clearTimeout(timeout); resolve(); };
+    };
+    
+    // Wait for voices if not ready
+    if (!voicesReady && window.speechSynthesis.getVoices().length === 0) {
+      setTimeout(doSpeak, 500);
+    } else {
+      doSpeak();
+    }
+  });
+}
+
+// Audio activation (must be called from user gesture)
+function activateAudio() {
+  if (!window.speechSynthesis) return;
+  // Force voice loading
+  window.speechSynthesis.getVoices();
+  // Speak empty to unlock audio
+  const u = new SpeechSynthesisUtterance(".");
+  u.volume = 0.01;
+  u.rate = 10;
+  window.speechSynthesis.speak(u);
+  // Try again after short delay
+  setTimeout(() => {
+    window.speechSynthesis.getVoices();
+    voicesReady = true;
+  }, 300);
+}
+
+// ── DATA ──
+const NATIONS=[
+  {id:"ko",flag:"🇰🇷",name:"한국인",nameEn:"Korean",char:"🧑‍🎤",color:"#f59e0b"},
+  {id:"en",flag:"🇺🇸",name:"American",nameKo:"미국인",char:"🤠",color:"#3b82f6"},
+  {id:"ja",flag:"🇯🇵",name:"日本人",nameEn:"Japanese",char:"🎎",color:"#ef4444"},
+  {id:"fr",flag:"🇫🇷",name:"Français",nameEn:"French",char:"🥖",color:"#8b5cf6"},
+  {id:"de",flag:"🇩🇪",name:"Deutsch",nameEn:"German",char:"🍺",color:"#f59e0b"},
+  {id:"ar",flag:"🇸🇦",name:"عربي",nameEn:"Arabic",char:"🕌",color:"#10b981"},
+];
+
+// UI Localization
+const UI = {
+  ko:{who:"당신은 누구인가요?",whoSub:"국적을 선택하세요",where:"어느 나라로 진출?",whereSub:"해외 캐스팅",level:"실력이 어느 정도예요?",levelSub:"수준에 맞게 안내해드릴게요",studio:"스튜디오",script:"대본실",dress:"분장실",beginner:"초급",intermediate:"중급",advanced:"고급",begD:"알고 듣고, 알고 말하기",intD:"먼저 듣고, 나중에 보기",advD:"스크립트 없이! 실전처럼!",listen:"듣기",myLine:"대사!",next:"다음 →",cut:"컷!",pass:"통과!",retry:"다시!",daily:"일상 시리즈",pro:"전문가 시리즈",recommend:"추천!",dirAdvice:"잘 모르겠으면 초급부터 시작하세요!",change:"변경",record:"녹음중",done:"촬영 완료!",quiz:"퀴즈!"},
+  en:{who:"Who are you?",whoSub:"Choose your nationality",where:"Where to?",whereSub:"Overseas Casting",level:"What's your level?",levelSub:"We'll guide you accordingly",studio:"Studio",script:"Script Room",dress:"Dressing Room",beginner:"Beginner",intermediate:"Intermediate",advanced:"Advanced",begD:"Read first, then listen & speak",intD:"Listen first, read later",advD:"No script! Real deal!",listen:"Listen",myLine:"Action!",next:"Next →",cut:"Cut!",pass:"Pass!",retry:"Retry!",daily:"Daily Series",pro:"Pro Series",recommend:"Recommended!",dirAdvice:"Not sure? Start with Beginner!",change:"Change",record:"Recording",done:"Scene Complete!",quiz:"Quiz!"},
+  ja:{who:"あなたは誰ですか？",whoSub:"国籍を選択",where:"どこへ進出？",whereSub:"海外キャスティング",level:"レベルは？",levelSub:"レベルに合わせてご案内",studio:"スタジオ",script:"台本室",dress:"楽屋",beginner:"初級",intermediate:"中級",advanced:"上級",begD:"読んで聞いて話す",intD:"まず聞いて、後で見る",advD:"台本なし！実戦！",listen:"聞く",myLine:"セリフ！",next:"次 →",cut:"カット！",pass:"合格！",retry:"もう一度！",daily:"日常シリーズ",pro:"プロシリーズ",recommend:"おすすめ！",dirAdvice:"迷ったら初級から！",change:"変更",record:"録音中",done:"撮影完了！",quiz:"クイズ！"},
+  fr:{who:"Qui êtes-vous ?",whoSub:"Choisissez votre nationalité",where:"Où aller ?",whereSub:"Casting international",level:"Quel est votre niveau ?",levelSub:"On vous guide",studio:"Studio",script:"Salle de script",dress:"Loge",beginner:"Débutant",intermediate:"Intermédiaire",advanced:"Avancé",begD:"Lire d'abord, écouter ensuite",intD:"Écouter d'abord",advD:"Sans script !",listen:"Écouter",myLine:"Action !",next:"Suivant →",cut:"Coupez !",pass:"Réussi !",retry:"Encore !",daily:"Série quotidienne",pro:"Série pro",recommend:"Recommandé !",dirAdvice:"Commencez par Débutant !",change:"Changer",record:"Enregistrement",done:"Scène terminée !",quiz:"Quiz !"},
+  de:{who:"Wer bist du?",whoSub:"Nationalität wählen",where:"Wohin?",whereSub:"Internationales Casting",level:"Dein Level?",levelSub:"Wir passen uns an",studio:"Studio",script:"Drehbuch",dress:"Garderobe",beginner:"Anfänger",intermediate:"Mittelstufe",advanced:"Fortgeschritten",begD:"Erst lesen, dann hören",intD:"Erst hören, dann lesen",advD:"Ohne Skript!",listen:"Hören",myLine:"Action!",next:"Weiter →",cut:"Schnitt!",pass:"Bestanden!",retry:"Nochmal!",daily:"Alltag",pro:"Profi",recommend:"Empfohlen!",dirAdvice:"Starte als Anfänger!",change:"Ändern",record:"Aufnahme",done:"Szene fertig!",quiz:"Quiz!"},
+  ar:{who:"من أنت؟",whoSub:"اختر جنسيتك",where:"إلى أين؟",whereSub:"كاستنج دولي",level:"ما مستواك؟",levelSub:"سنرشدك",studio:"استوديو",script:"غرفة السيناريو",dress:"غرفة الملابس",beginner:"مبتدئ",intermediate:"متوسط",advanced:"متقدم",begD:"اقرأ أولاً ثم استمع",intD:"استمع أولاً",advD:"بدون نص!",listen:"استمع",myLine:"!تمثيل",next:"التالي →",cut:"!قص",pass:"!نجاح",retry:"!أعد",daily:"يومي",pro:"محترف",recommend:"!موصى",dirAdvice:"!ابدأ كمبتدئ",change:"تغيير",record:"تسجيل",done:"!اكتمل المشهد",quiz:"!اختبار"},
+};
+
+const DESTS={
+  ko:[{id:"en",flag:"🇺🇸",icon:"🗽",name:"할리우드 진출",desc:"영어 대사 마스터",lang:"en-US",tK:"en",color:"#f59e0b"},{id:"ja",flag:"🇯🇵",icon:"⛩️",name:"도쿄 진출",desc:"일본어 대사 마스터",lang:"ja-JP",tK:"ja",color:"#ef4444"},{id:"zh",flag:"🇨🇳",icon:"🏯",name:"상하이 진출",desc:"중국어 대사 마스터",lang:"zh-CN",tK:"zh",color:"#3b82f6"}],
+  en:[{id:"ko",flag:"🇰🇷",icon:"🎭",name:"한류 스타 도전",desc:"Learn Korean!",lang:"ko-KR",tK:"ko",color:"#ec4899"},{id:"ja",flag:"🇯🇵",icon:"⛩️",name:"도쿄 진출",desc:"Learn Japanese!",lang:"ja-JP",tK:"ja",color:"#ef4444"},{id:"zh",flag:"🇨🇳",icon:"🏯",name:"상하이 진출",desc:"Learn Chinese!",lang:"zh-CN",tK:"zh",color:"#3b82f6"}],
+  ja:[{id:"en",flag:"🇺🇸",icon:"🗽",name:"ハリウッド進出",desc:"英語をマスター",lang:"en-US",tK:"en",color:"#f59e0b"},{id:"ko",flag:"🇰🇷",icon:"🎭",name:"韓流スター挑戦",desc:"韓国語をマスター",lang:"ko-KR",tK:"ko",color:"#ec4899"}],
+  fr:[{id:"en",flag:"🇺🇸",icon:"🗽",name:"Hollywood",desc:"Maîtriser l'anglais",lang:"en-US",tK:"en",color:"#f59e0b"},{id:"ko",flag:"🇰🇷",icon:"🎭",name:"K-Star",desc:"Apprendre le coréen",lang:"ko-KR",tK:"ko",color:"#ec4899"}],
+  de:[{id:"en",flag:"🇺🇸",icon:"🗽",name:"Hollywood",desc:"Englisch meistern",lang:"en-US",tK:"en",color:"#f59e0b"},{id:"ko",flag:"🇰🇷",icon:"🎭",name:"K-Star",desc:"Koreanisch lernen",lang:"ko-KR",tK:"ko",color:"#ec4899"}],
+  ar:[{id:"en",flag:"🇺🇸",icon:"🗽",name:"هوليوود",desc:"إتقان الإنجليزية",lang:"en-US",tK:"en",color:"#f59e0b"},{id:"ko",flag:"🇰🇷",icon:"🎭",name:"K-Star",desc:"تعلم الكورية",lang:"ko-KR",tK:"ko",color:"#ec4899"}],
+};
+const RANKS=[{min:0,t:"신입 단역",e:"🎬",c:"#64748b"},{min:3,t:"단역 배우",e:"🎭",c:"#94a3b8"},{min:8,t:"조연 후보",e:"⭐",c:"#4ade80"},{min:15,t:"조연 배우",e:"🌟",c:"#fbbf24"},{min:25,t:"주연 후보",e:"👑",c:"#f59e0b"},{min:40,t:"주연 배우",e:"🏆",c:"#ef4444"},{min:60,t:"레전드",e:"💎",c:"#8b5cf6"}];
+
+// ── SCENES: DAILY + PRO ──
+const DAILY=[
+  {id:"morning",cat:"🎭 일상",genre:"가족 드라마",gColor:"#f59e0b",title:"모닝콜",
+    bg:"linear-gradient(180deg,#1a1020,#2d1a3d 50%,#1a1020)",icon:"🛏️",
+    props:["🌙","⏰","🧸","⭐"],ambient:"아직 어두운 아침... 알람이 울린다",
+    introLine:"엄마가 아이 방 문을 열고 들어온다...",
+    roles:[{id:"mom",name:"엄마",emoji:"👩",color:"#ec4899"},{id:"son",name:"아들 Tom",emoji:"👦",color:"#3b82f6"}],
+    dialogue:[
+      {speaker:"son",en:"Mom, is it morning already?",ko:"엄마, 벌써 아침이에요?",ja:"ママ、もう朝？",zh:"妈妈，已经早上了吗？",act:"눈을 비비며",vocab:["already:벌써"]},
+      {speaker:"mom",en:"Come on honey, get up. It's time for school.",ko:"자, 일어나. 학교 갈 시간이야.",ja:"さあ、起きて。学校の時間よ。",zh:"快起来。该上学了。",act:"커튼을 열며",vocab:["get up:일어나다"]},
+      {speaker:"son",en:"Already? Five minutes Mom, please.",ko:"벌써요? 5분만 더요...",ja:"もう？あと5分だけ。",zh:"已经？再给我五分钟。",act:"이불을 뒤집어쓰며",vocab:["minutes:분"]},
+      {speaker:"mom",en:"No, you're late already. Hurry up.",ko:"안 돼. 벌써 늦었어. 서둘러.",ja:"ダメ、もう遅れてる。急いで。",zh:"不行，已经迟到了。快点。",act:"이불을 잡아당기며",vocab:["late:늦은","hurry up:서둘러"]},
+      {speaker:"son",en:"I'll be out in ten minutes.",ko:"10분 내로 나갈게요.",ja:"10分で出るよ。",zh:"我十分钟内就出去。",act:"일어나며",vocab:["be out:나가다"]},
+    ]},
+  {id:"taxi",cat:"🎭 일상",genre:"도시 로맨스",gColor:"#3b82f6",title:"비 오는 날의 택시",
+    bg:"linear-gradient(180deg,#0a0f1a,#1a2540 50%,#0a0f1a)",icon:"🚕",
+    props:["🌧️","🌧️","🏙️","💧"],ambient:"비가 쏟아지는 도심... 택시 미터기가 돌아간다",
+    introLine:"문을 열자 비에 젖은 승객이 뛰어든다...",
+    roles:[{id:"passenger",name:"승객",emoji:"🧑",color:"#8b5cf6"},{id:"driver",name:"택시기사",emoji:"🚕",color:"#f59e0b"}],
+    dialogue:[
+      {speaker:"driver",en:"Where to? You're soaking wet!",ko:"어디로? 완전 젖으셨네!",ja:"どちらまで？びしょ濡れですね！",zh:"去哪里？你全身都湿透了！",act:"미터기를 켜며",vocab:["soaking wet:홀딱 젖은"]},
+      {speaker:"passenger",en:"Seoul Station, please. And hurry, I'm late.",ko:"서울역이요. 서둘러주세요.",ja:"ソウル駅。急いで、遅れてます。",zh:"首尔站。快点，我迟到了。",act:"숨을 헐떡이며",vocab:["hurry:서두르다"]},
+      {speaker:"driver",en:"Which way do you usually take?",ko:"주로 어느 길로 가세요?",ja:"普段どの道を使いますか？",zh:"你平时走哪条路？",act:"내비를 보며",vocab:["usually:보통"]},
+      {speaker:"passenger",en:"The Hangang bridge. I think it's faster now.",ko:"한강대교요. 그게 더 빠를 거예요.",ja:"漢江大橋。今はそっちが早い。",zh:"汉江大桥。现在那条路更快。",act:"시계를 보며",vocab:["faster:더 빠른"]},
+      {speaker:"driver",en:"Got it. I'll take a shortcut I know.",ko:"알겠어요. 지름길로 갈게요.",ja:"了解。近道で行きますね。",zh:"明白了。我走捷径。",act:"핸들을 꺾으며",vocab:["shortcut:지름길"]},
+    ]},
+];
+const PRO=[
+  {id:"medical",cat:"💼 전문가",genre:"메디컬 드라마",gColor:"#ef4444",title:"응급실의 밤",
+    bg:"linear-gradient(180deg,#0a1a1a,#1a3d3d 50%,#0a1a1a)",icon:"🏥",
+    props:["💉","🩺","📋","❤️‍🩹"],ambient:"삐-삐-삐... 심전도 소리가 울린다",
+    introLine:"응급실 문이 열리고, 환자가 들어온다...",
+    roles:[{id:"doctor",name:"닥터 조",emoji:"👨‍⚕️",color:"#10b981"},{id:"nurse",name:"간호사 김",emoji:"👩‍⚕️",color:"#ec4899"},{id:"patient",name:"환자",emoji:"🤒",color:"#f59e0b"}],
+    dialogue:[
+      {speaker:"nurse",en:"Doctor! We have a new patient. He looks really pale.",ko:"선생님! 새 환자예요. 얼굴이 창백해요.",ja:"先生！新しい患者さんです。",zh:"医生！来了一位新病人。",act:"급히 달려오며",vocab:["patient:환자","pale:창백한"]},
+      {speaker:"doctor",en:"Bring him in. What are his symptoms?",ko:"데려와요. 증상이 뭐예요?",ja:"連れてきて。症状は？",zh:"带他进来。什么症状？",act:"장갑을 끼며",vocab:["symptoms:증상"]},
+      {speaker:"nurse",en:"High fever and severe stomach pain since this morning.",ko:"아침부터 고열에 심한 복통이래요.",ja:"今朝から高熱と激しい腹痛です。",zh:"从早上开始高烧和剧烈腹痛。",act:"차트를 건네며",vocab:["fever:열","severe:심한","stomach pain:복통"]},
+      {speaker:"doctor",en:"Sir, can you hear me? What seems to be the trouble?",ko:"들리세요? 어디가 아프세요?",ja:"聞こえますか？どうされましたか？",zh:"您能听到吗？哪里不舒服？",act:"다가가며",vocab:["trouble:문제"]},
+      {speaker:"patient",en:"My whole body aches and my stomach really hurts.",ko:"온몸이 쑤시고 배가 아파요.",ja:"体中が痛くてお腹が痛いです。",zh:"全身疼痛，肚子特别疼。",act:"고통스럽게",vocab:["ache:쑤시다","hurt:아프다"]},
+      {speaker:"doctor",en:"OK, open your mouth wide. Let me check.",ko:"입 크게 벌려보세요.",ja:"口を大きく開けてください。",zh:"请把嘴张大。",act:"펜라이트를 꺼내며",vocab:["wide:크게"]},
+      {speaker:"patient",en:"Is it serious, doctor? I'm really worried.",ko:"심각한 건가요? 걱정돼요.",ja:"深刻ですか？心配です。",zh:"严重吗？我很担心。",act:"불안한 눈빛",vocab:["serious:심각한","worried:걱정되는"]},
+      {speaker:"doctor",en:"Don't worry. We'll run some tests first.",ko:"걱정 마세요. 검사 해볼게요.",ja:"心配しないで。検査しましょう。",zh:"别担心。先做检查。",act:"안심시키며",vocab:["run tests:검사하다"]},
+    ],
+    // Pro Listening episode
+    proListening:{
+      title:{en:"Conference Q&A",ko:"컨퍼런스 Q&A",ja:"学会Q&A",zh:"学术问答"},
+      pres:{en:"The prefrontal cortex plays a crucial role in decision-making. Recent studies show that sleep deprivation significantly impairs this function. Subjects who slept less than five hours showed a forty percent decrease in prefrontal activity.",ko:"전전두엽은 의사결정에 핵심 역할을 합니다. 최근 연구에 따르면 수면 부족이 이 기능을 심각하게 손상시킵니다. 5시간 미만 수면 피험자는 전전두엽 활성도가 40% 감소했습니다.",ja:"前頭前皮質は意思決定に重要な役割を果たしています。最近の研究では、睡眠不足がこの機能を著しく損なうことが示されています。5時間未満の睡眠の被験者は、前頭前皮質の活動が40%減少しました。",zh:"前额叶皮层在决策中起着关键作用。最近的研究表明，睡眠不足会严重损害这一功能。睡眠不足五小时的受试者前额叶活动减少了40%。"},
+      ques:{en:"Could you explain how sleep deprivation specifically affects the prefrontal cortex?",ko:"수면 부족이 구체적으로 전전두엽에 어떻게 영향을 미치나요?",ja:"睡眠不足が前頭前皮質にどのように影響するか説明していただけますか？",zh:"您能解释一下睡眠不足是如何具体影响前额叶皮层的吗？"},
+      quiz:[{q:{en:"What was the main topic?",ko:"질문의 핵심은?",ja:"質問の要点は？",zh:"问题的核心是？"},opts:{en:["Effect of sleep deprivation on prefrontal cortex","Sleep and weight","Location of prefrontal cortex","Number of subjects"],ko:["수면 부족의 전전두엽 영향","수면 시간과 체중","전전두엽의 위치","피험자 수"],ja:["睡眠不足の前頭前皮質への影響","睡眠と体重","前頭前皮質の位置","被験者数"],zh:["睡眠不足对前额叶的影响","睡眠与体重","前额叶的位置","受试者人数"]},ans:0}],
+      vocab:["prefrontal cortex:전전두엽","sleep deprivation:수면 부족","impair:손상시키다"],
+    }},
+  {id:"bank",cat:"💼 전문가",genre:"금융 스릴러",gColor:"#f59e0b",title:"은행 창구",
+    bg:"linear-gradient(180deg,#1a1508,#2e2510 50%,#1a1508)",icon:"🏦",
+    props:["💰","📄","💳","🖊️"],ambient:"번호표를 뽑고... 창구에 앉는다",
+    introLine:"외국인 고객이 은행 문을 열고 들어온다...",
+    roles:[{id:"teller",name:"은행원",emoji:"🧑‍💼",color:"#f59e0b"},{id:"customer",name:"외국인 고객",emoji:"🧑",color:"#3b82f6"}],
+    dialogue:[
+      {speaker:"customer",en:"Hi, I just moved to Korea for work. I need to open a bank account.",ko:"안녕하세요, 직장 때문에 한국에 왔어요. 계좌를 개설해야 해요.",ja:"仕事で韓国に来ました。口座を開きたいです。",zh:"我因工作来韩国。需要开银行账户。",act:"창구에 앉으며",vocab:["bank account:은행 계좌"]},
+      {speaker:"teller",en:"Welcome! I can help you with that. Do you have your passport?",ko:"환영합니다! 도와드릴게요. 여권 있으세요?",ja:"ようこそ！パスポートはお持ちですか？",zh:"欢迎！请问有护照吗？",act:"미소를 지으며",vocab:["passport:여권"]},
+      {speaker:"customer",en:"Yes, here it is. I also need a debit card that works internationally.",ko:"네, 여기요. 국제 체크카드도 필요해요.",ja:"はい、ここです。国際デビットカードも必要です。",zh:"有，在这里。我还需要国际借记卡。",act:"서류를 꺼내며",vocab:["debit card:체크카드","internationally:국제적으로"]},
+      {speaker:"teller",en:"No problem. You'll also need your alien registration card.",ko:"문제없어요. 외국인등록증도 필요합니다.",ja:"大丈夫です。在留カードも必要です。",zh:"没问题。还需要外国人登录证。",act:"양식을 준비하며",vocab:["alien registration card:외국인등록증"]},
+      {speaker:"customer",en:"How long does it take to get the debit card?",ko:"체크카드 받는 데 얼마나 걸려요?",ja:"デビットカードはどのくらいかかりますか？",zh:"借记卡要多久能拿到？",act:"궁금한 표정으로",vocab:["how long:얼마나"]},
+      {speaker:"teller",en:"Usually about one week. We'll send it to your address.",ko:"보통 1주일 정도요. 주소로 보내드릴게요.",ja:"通常1週間くらいです。住所に送ります。",zh:"通常大约一周。会寄到您的地址。",act:"설명하며",vocab:["address:주소"]},
+    ],
+    proListening:{
+      title:{en:"Loan Consultation",ko:"외국인 대출 상담",ja:"ローン相談",zh:"贷款咨询"},
+      pres:{en:"I've been working in Korea for two years now. I'd like to apply for a mortgage. My annual salary is about sixty million won. I've heard foreigners can get up to seventy percent of the property value.",ko:"한국에서 2년째 일하고 있습니다. 주택담보대출을 신청하고 싶어요. 연봉은 약 6천만원입니다. 외국인은 감정가의 70%까지 대출이 가능하다고 들었습니다.",ja:"韓国で2年間働いています。住宅ローンを申し込みたいです。年収は約6千万ウォンです。外国人は評価額の70%まで借りられると聞きました。",zh:"我在韩国工作了两年。我想申请住房贷款。我的年薪大约六千万韩元。听说外国人最多可以贷到房产价值的70%。"},
+      ques:{en:"What's the current interest rate for foreigners? And do I need a Korean guarantor?",ko:"외국인 대출 현재 금리는 얼마인가요? 한국인 보증인이 필요한가요?",ja:"外国人向けの現在の金利はいくらですか？韓国人の保証人は必要ですか？",zh:"外国人目前的利率是多少？我需要韩国担保人吗？"},
+      quiz:[{q:{en:"What does the customer want?",ko:"고객이 원하는 것은?",ja:"顧客が望んでいるのは？",zh:"客户想要什么？"},opts:{en:["Mortgage","Savings","Exchange","Debit card"],ko:["주택담보대출","적금","환전","체크카드"],ja:["住宅ローン","定期預金","両替","デビットカード"],zh:["住房贷款","定期存款","换汇","借记卡"]},ans:0}],
+      vocab:["mortgage:주택담보대출","annual salary:연봉","guarantor:보증인"],
+    }},
+  {id:"chef",cat:"💼 전문가",genre:"쿡방",gColor:"#10b981",title:"셰프의 주방",
+    bg:"linear-gradient(180deg,#1a0f08,#3d2518 50%,#1a0f08)",icon:"👨‍🍳",
+    props:["🍳","🔥","🍷","🧄"],ambient:"주방에서 지글지글... 소스 끓는 냄새가 난다",
+    introLine:"오픈 키친에서 셰프가 불을 올린다...",
+    roles:[{id:"chef",name:"헤드 셰프",emoji:"👨‍🍳",color:"#10b981"},{id:"sous",name:"수셰프",emoji:"🧑‍🍳",color:"#f59e0b"},{id:"guest",name:"식당 손님",emoji:"🍽️",color:"#8b5cf6"}],
+    dialogue:[
+      {speaker:"guest",en:"Excuse me, what do you recommend tonight?",ko:"실례합니다, 오늘 뭘 추천하세요?",ja:"すみません、今夜のおすすめは？",zh:"请问今晚推荐什么？",act:"메뉴를 보며",vocab:["recommend:추천하다"]},
+      {speaker:"chef",en:"Our special today is pan-seared salmon with lemon butter sauce.",ko:"오늘 스페셜은 레몬버터소스 팬시어드 연어입니다.",ja:"本日のスペシャルはレモンバターソースのサーモンです。",zh:"今天的特色是柠檬黄油酱煎三文鱼。",act:"자신있게",vocab:["pan-seared:팬에 구운","salmon:연어"]},
+      {speaker:"guest",en:"That sounds amazing. Is it gluten-free?",ko:"맛있겠네요. 글루텐 프리인가요?",ja:"美味しそう。グルテンフリーですか？",zh:"听起来很棒。无麸质吗？",vocab:["gluten-free:글루텐 프리"]},
+      {speaker:"chef",en:"Yes, absolutely. We also have vegan options if you prefer.",ko:"네, 물론이죠. 비건 옵션도 있어요.",ja:"はい、もちろん。ビーガンオプションもあります。",zh:"是的。我们也有素食选择。",vocab:["vegan:비건"]},
+      {speaker:"sous",en:"Chef, the sauce is ready. Should I plate it now?",ko:"셰프님, 소스 준비됐어요. 지금 플레이팅할까요?",ja:"シェフ、ソースができました。盛り付けますか？",zh:"主厨，酱汁准备好了。现在摆盘吗？",act:"소스팬을 들고",vocab:["plate:플레이팅하다","sauce:소스"]},
+      {speaker:"chef",en:"Yes, go ahead. Make sure the presentation is perfect.",ko:"네, 해주세요. 프레젠테이션 완벽하게.",ja:"はい、お願いします。盛り付けを完璧に。",zh:"好的。确保摆盘完美。",vocab:["presentation:프레젠테이션,플레이팅"]},
+    ],
+    proListening:{
+      title:{en:"Master Class: Sauce Secret",ko:"마스터클래스: 소스의 비밀",ja:"マスタークラス：ソースの秘密",zh:"大师课：酱汁的秘密"},
+      pres:{en:"The secret to a perfect pasta sauce is patience. Let the tomatoes simmer on low heat for at least forty minutes. Never add sugar. Instead, add a small piece of carrot to naturally sweeten the sauce.",ko:"완벽한 파스타 소스의 비밀은 인내입니다. 토마토를 약한 불에 최소 40분 이상 끓이세요. 절대 설탕을 넣지 마세요. 대신 당근 조각을 넣으면 자연스럽게 달콤해집니다.",ja:"完璧なパスタソースの秘訣は忍耐です。トマトを弱火で少なくとも40分煮込みましょう。砂糖は絶対に加えないで。代わりにニンジンを少し入れると自然な甘みが出ます。",zh:"完美意面酱的秘诀是耐心。让番茄用小火至少煮40分钟。不要加糖。取而代之，加一小块胡萝卜来自然增甜。"},
+      ques:{en:"What if the sauce is still too acidic after forty minutes?",ko:"40분 후에도 소스가 너무 시면 어떻게 하나요?",ja:"40分後もソースがまだ酸っぱい場合はどうしますか？",zh:"如果40分钟后酱汁还是太酸怎么办？"},
+      quiz:[{q:{en:"What did the chef recommend for acidity?",ko:"셰프가 산미 잡는 데 추천한 것은?",ja:"シェフが酸味を抑えるために勧めたのは？",zh:"厨师推荐用什么来降低酸味？"},opts:{en:["Sugar","Baking soda","Carrot","Olive oil"],ko:["설탕","베이킹소다","당근","올리브오일"],ja:["砂糖","重曹","ニンジン","オリーブオイル"],zh:["糖","小苏打","胡萝卜","橄榄油"]},ans:2}],
+      vocab:["simmer:약불에 끓이다","acidity:산미","sweeten:달게 하다"],
+    }},
+  {id:"tech",cat:"💼 전문가",genre:"SF/다큐",gColor:"#3b82f6",title:"기술 세미나",
+    bg:"linear-gradient(180deg,#08101f,#152545 50%,#08101f)",icon:"🎤",
+    props:["📊","🖥️","🎙️","💡"],ambient:"조명이 어두워지고... 스크린에 발표가 시작된다",
+    introLine:"200명의 청중 앞에, 스포트라이트가 켜진다...",
+    roles:[{id:"presenter",name:"발표자",emoji:"🧑‍💻",color:"#6366f1"},{id:"audience",name:"청중",emoji:"🙋",color:"#8b5cf6"},{id:"moderator",name:"진행자",emoji:"🎙️",color:"#f59e0b"}],
+    dialogue:[
+      {speaker:"moderator",en:"Welcome everyone. Today's topic is AI model optimization.",ko:"환영합니다. 오늘 주제는 AI 모델 최적화입니다.",ja:"皆さん、ようこそ。テーマはAIモデル最適化です。",zh:"欢迎大家。今天的主题是AI模型优化。",act:"마이크를 잡으며",vocab:["optimization:최적화"]},
+      {speaker:"presenter",en:"Thank you. We achieved a seventy percent reduction in parameters.",ko:"감사합니다. 파라미터를 70% 줄였습니다.",ja:"ありがとうございます。パラメータを70%削減しました。",zh:"谢谢。我们将参数减少了70%。",act:"슬라이드를 넘기며",vocab:["reduction:감소","parameters:파라미터"]},
+      {speaker:"audience",en:"What was the inference speed improvement on real hardware?",ko:"실제 하드웨어에서 추론 속도 개선은요?",ja:"実際のハードウェアでの推論速度の改善は？",zh:"在实际硬件上推理速度提升了多少？",act:"손을 들며",vocab:["inference:추론","hardware:하드웨어"]},
+      {speaker:"presenter",en:"Great question. Three times faster on Raspberry Pi.",ko:"좋은 질문입니다. 라즈베리파이에서 3배 빨라졌습니다.",ja:"良い質問です。ラズベリーパイで3倍速くなりました。",zh:"好问题。在树莓派上快了三倍。",vocab:["three times:3배"]},
+      {speaker:"moderator",en:"Any more questions? We have time for one more.",ko:"질문 더 있으신가요? 하나 더 받겠습니다.",ja:"他に質問は？あと1つ受けます。",zh:"还有问题吗？还可以提一个。",vocab:["questions:질문"]},
+    ],
+    proListening:{
+      title:{en:"Quantum Computing Keynote",ko:"양자컴퓨팅 키노트",ja:"量子コンピューティング基調講演",zh:"量子计算主题演讲"},
+      pres:{en:"Quantum computing will revolutionize drug discovery. Current simulations that take months on classical computers could be completed in hours. Our latest quantum processor has reached one thousand qubits.",ko:"양자컴퓨팅은 신약 개발에 혁명을 일으킬 것입니다. 현재 기존 컴퓨터로 수개월 걸리는 시뮬레이션을 몇 시간에 완료할 수 있습니다. 우리 최신 양자 프로세서는 1000큐비트에 도달했습니다.",ja:"量子コンピューティングは創薬に革命をもたらします。従来のコンピュータで数ヶ月かかるシミュレーションが数時間で完了できます。最新の量子プロセッサは1000キュビットに到達しました。",zh:"量子计算将彻底改变药物研发。目前在传统计算机上需要数月的模拟可以在数小时内完成。我们最新的量子处理器已达到一千个量子比特。"},
+      ques:{en:"When do you expect quantum advantage to become practical for pharmaceutical companies?",ko:"양자 우위가 제약 회사에 실용화되는 시기는 언제로 예상하시나요?",ja:"量子優位性が製薬会社にとって実用的になる時期はいつ頃と予想されますか？",zh:"您预计量子优势何时能对制药公司产生实际意义？"},
+      quiz:[{q:{en:"What field will quantum computing revolutionize?",ko:"양자컴퓨팅이 혁명을 일으킬 분야는?",ja:"量子コンピューティングが革命を起こす分野は？",zh:"量子计算将在哪个领域带来革命？"},opts:{en:["Gaming","Drug discovery","Social media","Music"],ko:["게임","신약 개발","소셜미디어","음악"],ja:["ゲーム","創薬","SNS","音楽"],zh:["游戏","新药研发","社交媒体","音乐"]},ans:1}],
+      vocab:["quantum computing:양자컴퓨팅","drug discovery:신약 개발","qubits:큐비트"],
+    }},
+];
+const ALL_SCENES=[...DAILY,...PRO];
+
+// Puzzle helper
+const DIST=["always","never","very","much","going","been","could","should","their","about","after","before","still","just","also","more","some","make","want","need"];
+function mkPuz(sent,lvl){const w=sent.split(/\s+/);const g=[];if(lvl===1)for(let i=0;i<Math.ceil(w.length*.6);i++)g.push(i);if(lvl===2)w.forEach((_,i)=>{if(i%3===0)g.push(i)});if(lvl===3)g.push(0);
+const bl=w.map((x,i)=>g.includes(i)?x:null);const tp=w.filter((_,i)=>!g.includes(i));const ds=[...DIST].sort(()=>Math.random()-.5).filter(d=>!w.map(x=>x.toLowerCase()).includes(d.toLowerCase())).slice(0,Math.min(2,Math.max(1,Math.floor(tp.length*.3))));
+return{blanks:bl,bank:[...tp,...ds].sort(()=>Math.random()-.5),total:w.length}}
+function chk(a,b){const c=s=>s.toLowerCase().replace(/[^a-z0-9\s]/g,"").trim();const x=c(a).split(/\s+/),y=c(b).split(/\s+/);if(!x[0])return 0;let m=0;y.forEach(w=>{if(x.includes(w))m++});return m/y.length}
+
+// Director feedback — compares spoken vs target, gives specific corrections (0 tokens!)
+function directorNG(spoken,target){
+  const cln=s=>s.toLowerCase().replace(/[^a-z0-9'\s]/g,"").trim();
+  const sW=cln(spoken).split(/\s+/),tW=cln(target).split(/\s+/);
+  const tips=[];
+  // Find missing words
+  const missing=tW.filter(w=>!sW.includes(w));
+  const extra=sW.filter(w=>!tW.includes(w));
+  if(missing.length>0)tips.push({type:"missing",msg:`빠진 단어: "${missing.join(", ")}"`,fix:`이 단어들을 넣어보세요!`});
+  // Word order check
+  if(missing.length===0&&extra.length===0&&sW.join(" ")!==tW.join(" "))tips.push({type:"order",msg:"단어 순서가 조금 달라요",fix:"순서를 다시 확인해보세요!"});
+  // Common grammar mistakes
+  if(spoken.includes(" is ")&&target.includes(" are "))tips.push({type:"grammar",msg:'"is" → "are"',fix:"복수 주어엔 are를 써야 해요!"});
+  if(spoken.includes(" are ")&&target.includes(" is "))tips.push({type:"grammar",msg:'"are" → "is"',fix:"단수 주어엔 is를 써야 해요!"});
+  if(!spoken.toLowerCase().includes("please")&&target.toLowerCase().includes("please"))tips.push({type:"polite",msg:'"please"를 빼먹었어요',fix:"공손한 표현을 추가하면 더 자연스러워요!"});
+  // Plural check
+  tW.forEach(w=>{if(w.endsWith("s")&&sW.includes(w.slice(0,-1)))tips.push({type:"plural",msg:`"${w.slice(0,-1)}" → "${w}"`,fix:"복수형을 확인하세요!"})});
+  if(tips.length===0&&missing.length===0)tips.push({type:"good",msg:"거의 완벽해요!",fix:"억양과 발음에 집중해보세요."});
+  return tips;
+}
+
+const PH={INTRO:0,WHO:1,WHERE:2,LEVEL:3,STUDIO:4,SCENE:5,ROLE:6,SCRIPT:7,DRILL:8,DRESS:9,REHEARSAL:10,ACTION:11,RESULT:12,PRO_LISTEN:13,PRO_QUIZ:14,PRO_RESULT:15};
+
+function App(){
+  const [ph,setPh]=useState(PH.INTRO);
+  const [nat,setNat]=useState(null);
+  const [dest,setDest]=useState(null);
+  const [level,setLevel]=useState("beginner"); // beginner, intermediate, advanced
+  const [sc,setSc]=useState(null);
+  const [myR,setMyR]=useState(null);
+  const [li,setLi]=useState(0);
+  const [rev,setRev]=useState(0);
+  const [playing,setPlay]=useState(false);
+  const [hist,setHist]=useState([]);
+  const [lstn,setLstn]=useState(false);
+  const [tx,setTx]=useState("");
+  const [showTx,setShowTx]=useState(false);
+  const [ms,setMs]=useState(null);
+  const [peeks,setPeeks]=useState(0);
+  const [spkId,setSpkId]=useState(null);
+  const [hp,setHp]=useState(3);
+  const [combo,setCombo]=useState(0);
+  const [maxC,setMaxC]=useState(0);
+  const [xp,setXp]=useState(0);
+  const [clears,setClears]=useState(0);
+  const [mastery,setMastery]=useState([]);
+  const [vl,setVl]=useState([]);
+  const [vQ,setVQ]=useState(null);
+  const [vS,setVS]=useState(0);
+  const [dLvl,setDLvl]=useState(1);
+  const [dIdx,setDIdx]=useState(0);
+  const [dRes,setDRes]=useState(null);
+  const [puz,setPuz]=useState(null);
+  const [placed,setPlaced]=useState([]);
+  const [bank,setBank]=useState([]);
+  const [wt,setWt]=useState(null);
+  const [timer,setTimer]=useState(0);
+  const [timerOn,setTimerOn]=useState(false);
+  const [introStep,setIS]=useState(0);
+  const [tab,setTab]=useState("daily");
+  // Pro listening
+  const [proPhase,setProPhase]=useState("pres");
+  const [speed,setSpeed]=useState(0.85);
+  const [replays,setReplays]=useState(0);
+  const [showSc,setShowSc]=useState(false);
+  const [pqIdx,setPqIdx]=useState(0);
+  const [pqSel,setPqSel]=useState(null);
+  const [pqRes,setPqRes]=useState(null);
+  const [pqAnswers,setPqAnswers]=useState([]);
+  const recRef=useRef(null);
+  const chatRef=useRef(null);
+  const tmRef=useRef(null);
+  const mediaRecRef=useRef(null);
+  const [audioUrl,setAudioUrl]=useState(null);
+  const [dirTips,setDirTips]=useState([]);
+
+  useEffect(()=>{if(chatRef.current)chatRef.current.scrollIntoView({behavior:"smooth"})},[hist]);
+  useEffect(()=>{if(ph===PH.INTRO){const t=[setTimeout(()=>setIS(1),500),setTimeout(()=>setIS(2),1400),setTimeout(()=>setIS(3),2500),setTimeout(()=>setIS(4),3500)];return()=>t.forEach(clearTimeout)}},[ph]);
+  useEffect(()=>{if(timerOn){tmRef.current=setInterval(()=>setTimer(t=>t+1),1000);return()=>clearInterval(tmRef.current)}else clearInterval(tmRef.current)},[timerOn]);
+
+  const tL=dest?.lang||"en-US",tK=dest?.tK||"en",nK=nat?.id||"ko";
+  const gT=d=>d[tK]||d.en,gN=d=>d[nK]||d.ko;
+  const u=UI[nK]||UI.ko; // UI text in user's native language
+  const rank=RANKS.slice().reverse().find(r=>clears>=r.min)||RANKS[0];
+
+  const startSTT=useCallback(()=>{
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR)return;
+    // Start MediaRecorder for playback
+    setAudioUrl(null);setDirTips([]);
+    if(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia){
+      navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
+        const mr=new MediaRecorder(stream);const chunks=[];
+        mr.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data)};
+        mr.onstop=()=>{const blob=new Blob(chunks,{type:"audio/webm"});setAudioUrl(URL.createObjectURL(blob));stream.getTracks().forEach(t=>t.stop())};
+        mr.start();mediaRecRef.current=mr;
+      }).catch(()=>{});
+    }
+    const r=new SR();r.lang=tL;r.interimResults=false;
+    r.onresult=e=>{const t=e.results[0][0].transcript;setTx(t);setShowTx(true);setLstn(false);setTimerOn(false);
+      if(mediaRecRef.current&&mediaRecRef.current.state==="recording")mediaRecRef.current.stop();
+      const target=gT(sc.dialogue[li]);const s=chk(t,target);setMs(s);
+      // Director feedback
+      setDirTips(directorNG(t,target));
+      if(s>=0.4){setCombo(c=>{const n=c+1;if(n>maxC)setMaxC(n);return n});setXp(x=>x+10+combo*2)}else{setCombo(0);setHp(h=>h-1)}};
+    r.onerror=()=>{setLstn(false);if(mediaRecRef.current&&mediaRecRef.current.state==="recording")mediaRecRef.current.stop()};
+    r.onend=()=>{setLstn(false)};
+    recRef.current=r;setTx("");setShowTx(false);setMs(null);setLstn(true);r.start();setTimerOn(true);setTimer(0);
+  },[sc,li,tL,tK,combo,maxC]);
+
+  const nextLine=()=>{const dl=sc.dialogue;const line=dl[li];const isMe=line.speaker===myR;
+    if(isMe){setMastery(m=>[...m,{en:gT(line),grade:rev===0&&ms>=0.4?"green":rev<=1&&ms>=0.4?"yellow":"red"}])}
+    setHist(p=>[...p,{...dl[li],tx,ms}]);
+    if(line.vocab&&(rev>0||(ms!==null&&ms<0.6)))setVl(v=>{const n=[...v];line.vocab.forEach(x=>{if(!n.includes(x))n.push(x)});return n});
+    if(li<dl.length-1){setLi(c=>c+1);setRev(0);setTx("");setShowTx(false);setMs(null);setSpkId(null);setTimerOn(false);setTimer(0);setAudioUrl(null);setDirTips([])}
+    else{setTimerOn(false);setClears(c=>c+1);setPh(PH.RESULT)}};
+
+  const reset=p=>{setLi(0);setRev(0);setHist([]);setTx("");setShowTx(false);setPeeks(0);setMs(null);setSpkId(null);setHp(3);setCombo(0);setMaxC(0);setTimer(0);setTimerOn(false);setMastery([]);setAudioUrl(null);setDirTips([]);setPh(p)};
+
+  const line=sc?.dialogue[li];
+  const isMe=line?.speaker===myR;
+  const dc=dest?.color||"#f59e0b";
+
+  // Nav
+  const Nav=({all})=>(<div style={N.bar}>
+    <button onClick={()=>setPh(PH.STUDIO)} style={N.btn}>🎬 <span style={N.t}>{u.studio}</span></button>
+    {all&&sc&&<><button onClick={()=>setPh(PH.SCRIPT)} style={N.btn}>📖 <span style={N.t}>{u.script}</span></button>
+    <button onClick={()=>setPh(PH.DRESS)} style={N.btn}>💄 <span style={N.t}>{u.dress}</span><span style={{fontSize:9,color:"#ec4899",marginLeft:2}}>{vl.length}</span></button></>}
+    <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:4}}>
+      <span style={{fontSize:11}}>{rank.e}</span><span style={{fontSize:9,color:rank.c,fontWeight:700}}>{rank.t}</span>
+    </div>
+  </div>);
+
+  // ═══ INTRO ═══
+  if(ph===PH.INTRO)return(<div style={S.pg}><style>{CSS}</style><div style={S.introW}><div style={S.grain}/><div style={S.lT}/><div style={S.lB}/>
+    <div style={{textAlign:"center",zIndex:3}}>
+      {introStep>=1&&<div className="fu"><span style={{fontSize:10,letterSpacing:3,color:"#64748b",textTransform:"uppercase"}}>A SnapQ Production</span></div>}
+      {introStep>=2&&<div className="fu"><h1 style={S.logo}>SnapQ Talk</h1><p style={{fontSize:13,color:"#94a3b8",letterSpacing:2,margin:0}}>You Are The Actor</p></div>}
+      {introStep>=3&&<div className="fu"><p style={{fontSize:13,color:"#cbd5e1",margin:"10px 0 3px"}}>대본을 외우고, 리허설하고, 촬영하세요.</p><p style={{fontSize:12,color:"#64748b"}}>당신의 언어가 영화가 됩니다.</p></div>}
+      {introStep>=4&&<div className="fu" style={{display:"flex",flexDirection:"column",gap:8,alignItems:"center"}}>
+        <button onClick={()=>{activateAudio();say("Welcome to SnapQ Talk","en-US",0.9)}} style={{...S.introBtn,background:"rgba(59,130,246,0.1)",borderColor:"rgba(59,130,246,0.3)",color:"#60a5fa",fontSize:11}}>🔊 사운드 테스트 (여기를 먼저 터치!)</button>
+        <button onClick={()=>{activateAudio();setPh(PH.WHO)}} style={S.introBtn}>🎬 스튜디오 입장</button>
+      </div>}
+    </div>
+  </div></div>);
+
+  // ═══ WHO ═══
+  if(ph===PH.WHO)return(<div style={S.pg}><style>{CSS}</style>
+    <div style={{textAlign:"center",padding:"16px 0 10px"}}><div style={{fontSize:28}}>🎬</div><h1 style={{...S.logo,fontSize:24}}>SnapQ Talk</h1>
+      <h2 style={{fontSize:18,fontWeight:800,color:"#fff",margin:"8px 0 3px"}}>Who are you? 당신은?</h2>
+      <p style={{fontSize:12,color:"#94a3b8"}}>Choose nationality / 국적 선택</p></div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+      {NATIONS.map((n,i)=>(<button key={n.id} onClick={()=>{setNat(n);setPh(PH.WHERE)}} className="fu" style={{...S.natCard,borderColor:`${n.color}25`,animationDelay:`${i*60}ms`}}>
+        <span style={{fontSize:22}}>{n.char}</span>
+        <span style={{fontSize:14,fontWeight:800,color:"#fff"}}>{n.name}</span>
+        <span style={{fontSize:9,color:"#64748b"}}>{n.nameEn||n.nameKo||""}</span>
+      </button>))}
+    </div>
+  </div>);
+
+  // ═══ WHERE ═══
+  if(ph===PH.WHERE){const ds=DESTS[nat.id]||[];return(<div style={S.pg}><style>{CSS}</style>
+    <button onClick={()=>setPh(PH.WHO)} style={S.bk}>←</button>
+    <div style={{textAlign:"center",padding:"8px 0 12px"}}><span style={{fontSize:24}}>{nat.char}</span>
+      <h2 style={{fontSize:18,fontWeight:800,color:"#fff",margin:"6px 0 3px"}}>{u.where}</h2>
+      <p style={{fontSize:11,color:"#94a3b8"}}>{u.whereSub}</p></div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {ds.map((d,i)=>(<button key={d.id} onClick={()=>{setDest(d);setPh(PH.LEVEL)}} className="fu" style={{...S.destCard,borderColor:`${d.color}25`,animationDelay:`${i*80}ms`}}>
+        <span style={{fontSize:30}}>{d.flag}</span><span style={{fontSize:24}}>{d.icon}</span>
+        <div style={{flex:1,textAlign:"left"}}><div style={{fontSize:14,fontWeight:700,color:"#fff"}}>{d.name}</div><div style={{fontSize:10,color:d.color,marginTop:1}}>{d.desc}</div></div>
+      </button>))}
+    </div>
+  </div>)}
+
+  // ═══ LEVEL SELECT ═══
+  if (ph === PH.LEVEL) {
+    const lvData = [
+      { id:"beginner", emoji:"🎬", title:"단역 배우",titleEn:"Extra",
+        desc:"짧은 대사, 감독이 친절하게! 대본 먼저 보고 외워서 촬영!",
+        quote:"\"모든 톱스타는 단역에서 시작했다. 걱정 마, 내가 가르쳐줄게.\"",
+        color:"94a3b8",bg:"linear-gradient(135deg,#1a1a2e,#16213e)" },
+      { id:"intermediate", emoji:"⭐", title:"조연 배우",titleEn:"Supporting",
+        desc:"대사가 길어진다! 듣고 바로 말하기. 귀를 먼저 쓰는 훈련!",
+        quote:"\"조연은 주연보다 더 정확해야 해. 한 마디도 놓치지 마.\"",
+        color:"fbbf24",bg:"linear-gradient(135deg,#1a1508,#2e2510)" },
+      { id:"advanced", emoji:"👑", title:"주연 배우",titleEn:"Lead",
+        desc:"긴 독백, 프레젠테이션, Q&A! 스크립트 없이 실전처럼!",
+        quote:"\"주연은 무대 위에서 혼자 빛나야 한다. 준비됐나?\"",
+        color:"f59e0b",bg:"linear-gradient(135deg,#1a0f08,#2e1a0f)" },
+    ];
+    return (
+      <div style={S.pg}><style>{CSS}</style>
+        <button onClick={() => setPh(PH.WHERE)} style={S.bk}>←</button>
+        <div style={{textAlign:"center",padding:"8px 0 12px"}}>
+          <div style={{fontSize:36}}>🎥</div>
+          <h2 style={{fontSize:18,fontWeight:800,color:"#fff",margin:"6px 0 3px"}}>감독: "자네는 어떤 배우야?"</h2>
+          <p style={{fontSize:11,color:"#94a3b8"}}>모든 톱스타는 단역에서 시작했다</p>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {lvData.map((lv, i) => (
+            <button key={lv.id} onClick={() => { setLevel(lv.id); setPh(PH.STUDIO); }}
+              className="fu" style={{
+                display:"block",width:"100%",padding:"16px",
+                background:lv.bg,
+                border:`1px solid #${lv.color}30`,borderRadius:14,cursor:"pointer",color:"#e2e8f0",
+                textAlign:"left",animationDelay:`${i*120}ms`,fontFamily:F,position:"relative",overflow:"hidden",
+              }}>
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:8}}>
+                <div style={{width:48,height:48,borderRadius:"50%",background:`#${lv.color}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,border:`2px solid #${lv.color}50`}}>{lv.emoji}</div>
+                <div>
+                  <div style={{fontSize:18,fontWeight:900,color:`#${lv.color}`}}>{lv.title}</div>
+                  <div style={{fontSize:10,color:"#64748b"}}>{lv.titleEn}</div>
+                </div>
+              </div>
+              <div style={{fontSize:11,color:"#e2e8f0",lineHeight:1.5,marginBottom:6}}>{lv.desc}</div>
+              <div style={{fontSize:10,color:`#${lv.color}`,fontStyle:"italic"}}>{lv.quote}</div>
+            </button>
+          ))}
+        </div>
+        <div style={{marginTop:12,padding:"10px 12px",background:"rgba(245,158,11,0.06)",borderRadius:10,border:"1px solid rgba(245,158,11,0.1)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{fontSize:20}}>🎥</span>
+            <div><div style={{fontSize:8,fontWeight:700,color:"#f59e0b",letterSpacing:"1px"}}>DIRECTOR</div>
+              <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.5}}>처음이라면 단역부터! 깨지고, 일어서고, 도전하고... 그게 배우의 길이야. 하루하루가 드라마다!</div></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ═══ STUDIO ═══
+  if(ph===PH.STUDIO){
+    const lvC=level==="beginner"?"94a3b8":level==="intermediate"?"fbbf24":"f59e0b";
+    const lvE=level==="beginner"?"🎬":level==="intermediate"?"⭐":"👑";
+    const lvT=level==="beginner"?"단역 배우":level==="intermediate"?"조연 배우":"주연 배우";
+    const lvGuide=level==="beginner"?"\"단역이라고 무시하지 마. 대본부터 완벽하게 외워와.\""
+      :level==="intermediate"?"\"조연은 감이 있어야 해. 듣고 바로 반응할 수 있어야 해.\""
+      :"\"주연은 무대 위에서 혼자 빛나야 한다. 스크립트 없이 가자.\"";
+  return(<div style={S.pg}><style>{CSS}</style>
+    <div style={{textAlign:"center",padding:"10px 0 6px"}}><h1 style={{...S.logo,fontSize:24}}>🎬 스튜디오</h1></div>
+    {/* Identity + Actor Grade */}
+    <div style={S.card}><div style={{display:"flex",alignItems:"center",gap:8}}>
+      <span style={{fontSize:16}}>{nat?.flag} {nat?.char}</span>
+      <div style={{flex:1}}>
+        <span style={{fontSize:10,fontWeight:700,color:dc}}>{nat?.name} → {dest?.flag} {dest?.name}</span>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginTop:3}}>
+          <span style={{fontSize:16}}>{rank.e}</span>
+          <span style={{fontSize:11,fontWeight:700,color:rank.c}}>{rank.t}</span>
+          <span style={{fontSize:9,color:"#475569",marginLeft:4}}>XP {xp}</span>
+        </div>
+      </div>
+      <button onClick={()=>setPh(PH.LEVEL)} style={{padding:"4px 8px",borderRadius:6,background:`#${lvC}15`,border:`1px solid #${lvC}30`,color:`#${lvC}`,fontSize:9,fontWeight:700,cursor:"pointer",fontFamily:F}}>{lvE} {lvT}</button>
+    </div></div>
+    {/* Director */}
+    <div style={{margin:"6px 0",padding:"8px 10px",background:"rgba(245,158,11,0.05)",border:"1px solid rgba(245,158,11,0.1)",borderRadius:8}}>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <span style={{fontSize:18}}>🎥</span>
+        <div><div style={{fontSize:8,fontWeight:700,color:"#f59e0b",letterSpacing:"1px"}}>DIRECTOR</div>
+          <div style={{fontSize:10,color:"#e2e8f0",fontStyle:"italic"}}>{lvGuide}</div></div>
+      </div>
+    </div>
+
+    {/* Tabs */}
+    <div style={{display:"flex",gap:6,margin:"10px 0 8px"}}>
+      <button onClick={()=>setTab("daily")} style={{...S.tabBtn,background:tab==="daily"?"rgba(245,158,11,0.15)":"rgba(255,255,255,0.03)",color:tab==="daily"?"#f59e0b":"#64748b"}}>🎭 {u.daily}</button>
+      <button onClick={()=>setTab("pro")} style={{...S.tabBtn,background:tab==="pro"?"rgba(59,130,246,0.15)":"rgba(255,255,255,0.03)",color:tab==="pro"?"#3b82f6":"#64748b"}}>💼 {u.pro}</button>
+    </div>
+
+    {/* Scene list — visual cards */}
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {(tab==="daily"?DAILY:PRO).map((s,i)=>(<button key={s.id} onClick={()=>{setSc(s);setPh(PH.ROLE)}} className="fu" style={{
+        display:"block",width:"100%",background:s.bg||"rgba(255,255,255,0.02)",
+        border:`1px solid ${s.gColor}25`,borderRadius:14,cursor:"pointer",color:"#e2e8f0",
+        textAlign:"left",position:"relative",overflow:"hidden",padding:0,animationDelay:`${i*80}ms`,fontFamily:F,
+      }}>
+        {/* Scene visual header */}
+        <div style={{position:"relative",height:80,display:"flex",alignItems:"center",padding:"0 14px"}}>
+          {/* Floating props */}
+          {s.props&&s.props.map((p,j)=><span key={j} style={{position:"absolute",fontSize:12+j*2,opacity:0.1,top:8+j*10,right:8+j*30,animation:`float ${3+j}s ease-in-out infinite alternate`}}>{p}</span>)}
+          {/* Spotlight */}
+          <div style={{position:"absolute",bottom:0,left:"30%",width:120,height:60,borderRadius:"50%",background:`radial-gradient(ellipse,${s.gColor}15,transparent 70%)`,pointerEvents:"none"}}/>
+          {/* Scene icon + chars preview */}
+          <span style={{fontSize:32,marginRight:10,zIndex:2}}>{s.icon||s.roles[0]?.emoji}</span>
+          <div style={{display:"flex",gap:-4,zIndex:2}}>
+            {s.roles.map((r,ri)=><div key={ri} style={{
+              width:32,height:32,borderRadius:"50%",background:`linear-gradient(135deg,${r.color||s.gColor},${r.color||s.gColor}bb)`,
+              display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,
+              border:"2px solid rgba(255,255,255,0.5)",marginLeft:ri>0?-6:0,zIndex:10-ri,
+            }}>{r.emoji}</div>)}
+          </div>
+        </div>
+        {/* Scene info */}
+        <div style={{padding:"8px 14px 12px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+            <span style={{...S.gTag,background:s.gColor}}>{s.genre}</span>
+            {s.proListening&&<span style={{fontSize:7,color:"#3b82f6",fontWeight:700,background:"rgba(59,130,246,0.1)",padding:"1px 5px",borderRadius:4}}>🎧 리스닝</span>}
+          </div>
+          <div style={{fontSize:15,fontWeight:800,color:"#fff"}}>{s.title}</div>
+          {s.ambient&&<div style={{fontSize:9,color:"#64748b",fontStyle:"italic",marginTop:2}}>{s.ambient}</div>}
+          <div style={{fontSize:9,color:"#475569",marginTop:4}}>{s.roles.map(r=>r.name).join(" · ")} · {s.dialogue.length}줄</div>
+        </div>
+      </button>))}
+    </div>
+  </div>)}
+
+  // ═══ ROLE ═══
+  if(ph===PH.ROLE){
+    const lvC2=level==="beginner"?"94a3b8":level==="intermediate"?"fbbf24":"f59e0b";
+    const lvE2=level==="beginner"?"🎬":level==="intermediate"?"⭐":"👑";
+    const lvT2=level==="beginner"?"단역":level==="intermediate"?"조연":"주연";
+  return(<div style={S.pg}><style>{CSS}</style><Nav/>
+    {/* Scene header with bg */}
+    <div style={{position:"relative",borderRadius:12,overflow:"hidden",padding:"16px",marginBottom:10,background:sc.bg||"rgba(255,255,255,0.02)",border:`1px solid ${sc.gColor}20`}}>
+      {sc.props&&sc.props.map((p,j)=><span key={j} style={{position:"absolute",fontSize:14,opacity:0.1,top:6+j*12,right:6+j*25,animation:`float ${3+j}s ease-in-out infinite alternate`}}>{p}</span>)}
+      <div style={{position:"relative",zIndex:2,textAlign:"center"}}>
+        <span style={{fontSize:36}}>{sc.icon||"🎬"}</span>
+        <div style={{...S.gTag,background:sc.gColor,margin:"6px auto"}}>{sc.genre}</div>
+        <h2 style={{fontSize:20,fontWeight:900,color:"#fff",margin:"4px 0"}}>{sc.title}</h2>
+        {sc.ambient&&<p style={{fontSize:10,color:"#94a3b8",fontStyle:"italic"}}>{sc.ambient}</p>}
+        <span style={{fontSize:9,color:`#${lvC2}`,background:`#${lvC2}15`,padding:"2px 8px",borderRadius:5,marginTop:4,display:"inline-block"}}>{lvE2} {lvT2} 배우로 촬영</span>
+      </div>
+    </div>
+    {/* Role selection */}
+    <div style={{fontSize:12,fontWeight:700,color:"#fff",marginBottom:6}}>배역을 선택하세요</div>
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {sc.roles.map(role=>{const cnt=sc.dialogue.filter(d=>d.speaker===role.id).length;
+        return(<button key={role.id} onClick={()=>{setMyR(role.id);setVl([]);reset(PH.SCRIPT)}} style={{
+          display:"flex",alignItems:"center",gap:10,padding:"12px 14px",
+          background:"rgba(255,255,255,0.03)",border:`1px solid ${role.color||sc.gColor}30`,
+          borderRadius:12,cursor:"pointer",color:"#e2e8f0",width:"100%",fontFamily:F,
+        }}>
+          <div style={{width:44,height:44,borderRadius:"50%",background:`linear-gradient(135deg,${role.color||sc.gColor},${role.color||sc.gColor}bb)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,border:"2px solid rgba(255,255,255,0.6)"}}>{role.emoji}</div>
+          <div style={{flex:1,textAlign:"left"}}><div style={{fontSize:14,fontWeight:700,color:"#fff"}}>{role.name}</div>
+            <div style={{fontSize:10,color:role.color||sc.gColor}}>대사 {cnt}줄</div></div>
+          <span style={{color:"#475569",fontSize:14}}>→</span>
+        </button>)})}
+    </div>
+    {/* Director advice */}
+    <div style={{margin:"10px 0",padding:"8px 10px",background:"rgba(245,158,11,0.05)",border:"1px solid rgba(245,158,11,0.1)",borderRadius:8}}>
+      <div style={{fontSize:8,fontWeight:700,color:"#f59e0b",letterSpacing:"1px"}}>🎥 DIRECTOR</div>
+      <div style={{fontSize:10,color:"#e2e8f0",marginTop:2,fontStyle:"italic"}}>
+        {level==="beginner"?"\"배역을 골라. 대본실에서 대사부터 완벽하게 외우고 와. 그래야 촬영이 되지.\""
+        :level==="intermediate"?"\"좋아, 감 잡았지? 대본 빠르게 훑고 바로 촬영 들어가자.\""
+        :"\"주연은 대본 없이 해야지. 바로 촬영이야. 아니면 전문가 리스닝 먼저 해봐.\""}
+      </div>
+    </div>
+    {/* Pro Listening button */}
+    {sc.proListening&&<button onClick={()=>{setProPhase("pres");setReplays(0);setShowSc(false);setSpeed(0.85);setPqIdx(0);setPqSel(null);setPqRes(null);setPqAnswers([]);setPh(PH.PRO_LISTEN)}}
+      style={{...S.nBtn,background:"linear-gradient(135deg,#3b82f6,#6366f1)",marginTop:6}}>
+      🎧 {sc.proListening.title[nK]||sc.proListening.title.ko}
+    </button>}
+  </div>)}
+
+  // ═══ SCRIPT ═══
+  if(ph===PH.SCRIPT){const myRO=sc.roles.find(r=>r.id===myR);const myDl=sc.dialogue.filter(d=>d.speaker===myR);
+  return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+    <div style={{...S.cover,borderColor:`${sc.gColor}25`}}>
+      <div style={{fontSize:8,fontWeight:700,letterSpacing:2,color:"#64748b",border:"1px solid #334155",padding:"2px 8px",borderRadius:4,display:"inline-block"}}>📜 SCRIPT</div>
+      <h2 style={{fontSize:16,fontWeight:800,color:"#fff",margin:"6px 0 2px"}}>{sc.title}</h2>
+      <div style={{...S.gTag,background:sc.gColor,margin:"4px 0"}}>나: {myRO.emoji} {myRO.name}</div>
+    </div>
+    <div style={{fontSize:12,fontWeight:700,color:"#fff",margin:"6px 0 4px"}}>🎤 내 대사 ({myDl.length}줄)</div>
+    {myDl.map((d,i)=>(<div key={i} style={{...S.sLine,borderLeftColor:sc.gColor}}>
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:2}}><span style={{fontSize:12}}>{myRO.emoji}</span><span style={{fontSize:9,fontWeight:600,color:sc.gColor}}>{myRO.name}</span>
+        <button onClick={()=>say(gT(d),tL,0.75)} style={S.mini}>🔊</button></div>
+      <p style={{fontSize:12,color:"#fff",margin:"0 0 1px",lineHeight:1.4}}>{gT(d)}</p>
+      <p style={{fontSize:9,color:"#64748b",margin:0}}>{gN(d)}</p>
+    </div>))}
+    <div style={{fontSize:12,fontWeight:700,color:"#fff",margin:"10px 0 4px"}}>📜 전체 대본</div>
+    {sc.dialogue.map((d,i)=>{const r=sc.roles.find(ro=>ro.id===d.speaker);const mine=d.speaker===myR;
+      return(<div key={i} style={{...S.sLine,borderLeftColor:mine?sc.gColor:"rgba(255,255,255,0.08)",background:mine?`${sc.gColor}06`:"transparent"}}>
+        <div style={{display:"flex",alignItems:"center",gap:3}}><span style={{fontSize:10}}>{r?.emoji}</span><span style={{fontSize:8,fontWeight:600,color:mine?sc.gColor:"#64748b"}}>{r?.name}{mine?" (나)":""}</span>
+          <button onClick={()=>say(gT(d),tL,0.75)} style={S.mini}>🔊</button></div>
+        <p style={{fontSize:11,color:mine?"#e2e8f0":"#94a3b8",margin:"2px 0 0",lineHeight:1.3}}>{gT(d)}</p>
+        <p style={{fontSize:9,color:"#475569",margin:0}}>{gN(d)}</p>
+      </div>)})}
+    <div style={{marginTop:12,display:"flex",flexDirection:"column",gap:6}}>
+      <button onClick={()=>{setDIdx(0);setDLvl(1);setDRes(null);const md=sc.dialogue.filter(d=>d.speaker===myR);if(md[0]){const p=mkPuz(gT(md[0]),1);setPuz(p);setPlaced([]);setBank([...p.bank]);setWt(null)}setPh(PH.DRILL)}} style={{...S.nBtn,background:"linear-gradient(135deg,#8b5cf6,#6366f1)",border:level==="beginner"?"2px solid #4ade80":"none"}}>✏️ 대사 연습장 {level==="beginner"?"← 🟢 추천!":""}</button>
+      <button onClick={()=>reset(PH.REHEARSAL)} style={{...S.nBtn,background:"linear-gradient(135deg,#3b82f6,#6366f1)"}}>🎭 리허설</button>
+      <button onClick={()=>reset(PH.ACTION)} style={{...S.nBtn,background:`linear-gradient(135deg,${sc.gColor},${sc.gColor}bb)`,border:level==="intermediate"?"2px solid #fbbf24":level==="advanced"?"2px solid #ef4444":"none"}}>🎬 본촬영! (❤️HP) {level==="intermediate"?"← 🟡 추천!":level==="advanced"?"← 🔴 추천!":""}</button>
+    </div>
+  </div>)}
+
+  // ═══ DRILL ═══
+  if(ph===PH.DRILL){const myDl=sc.dialogue.filter(d=>d.speaker===myR);const dl=myDl[dIdx];const myRO=sc.roles.find(r=>r.id===myR);
+    const tap=(w,bi)=>{if(!puz||dRes)return;let si=-1;for(let i=0;i<puz.blanks.length;i++){if(puz.blanks[i]===null&&!placed.find(p=>p.slot===i)){si=i;break}}if(si===-1)return;
+      const tw=gT(dl).split(/\s+/);if(tw[si]?.toLowerCase().replace(/[^a-z0-9]/g,"")===w.toLowerCase().replace(/[^a-z0-9]/g,"")){
+        const np=[...placed,{slot:si,word:w}];setPlaced(np);setBank(b=>b.filter((_,i)=>i!==bi));setWt(null);if(np.length===puz.blanks.filter(b=>b===null).length)setDRes("pass")}else{setWt(bi);setTimeout(()=>setWt(null),500)}};
+    const adv=()=>{if(dIdx<myDl.length-1){const ni=dIdx+1;setDIdx(ni);const p=mkPuz(gT(myDl[ni]),dLvl);setPuz(p);setPlaced([]);setBank([...p.bank]);setDRes(null)}else if(dLvl<4){const nl=dLvl+1;setDLvl(nl);setDIdx(0);const p=mkPuz(gT(myDl[0]),nl);setPuz(p);setPlaced([]);setBank([...p.bank]);setDRes(null)}else setPh(PH.SCRIPT)};
+    const disp=puz?puz.blanks.map((w,i)=>{if(w!==null)return{t:"g",w,i};const p=placed.find(pl=>pl.slot===i);return p?{t:"p",w:p.word,i}:{t:"b",i}}):[];
+  return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+      <span style={{...S.gTag,background:"#8b5cf6"}}>✏️ 대사연습장</span><span style={{fontSize:10,color:"#94a3b8"}}>Lv.{dLvl}/4</span>
+      <span style={{fontSize:9,color:"#475569",marginLeft:"auto"}}>{dIdx+1}/{myDl.length}</span></div>
+    <div style={{display:"flex",gap:3,marginBottom:8}}>{[1,2,3,4].map(l=><div key={l} style={{flex:1,height:3,borderRadius:2,background:l<=dLvl?"#8b5cf6":"rgba(255,255,255,0.06)"}}/>)}</div>
+    {dl&&<div style={S.drillCard}>
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:4}}><span style={{fontSize:14}}>{myRO.emoji}</span><span style={{fontSize:10,fontWeight:600,color:sc.gColor}}>{myRO.name}</span></div>
+      <div style={{fontSize:13,color:"#f59e0b",margin:"4px 0",lineHeight:1.4}}>{gN(dl)}</div>
+      {dLvl<4?<>
+        <div style={{display:"flex",flexWrap:"wrap",gap:4,padding:"8px",background:"rgba(0,0,0,0.25)",borderRadius:8,minHeight:36,alignItems:"center"}}>
+          {disp.map((d,i)=><div key={i} style={{padding:"4px 9px",borderRadius:6,fontSize:12,fontWeight:600,...(d.t==="g"?{background:"rgba(255,255,255,0.07)",color:"#94a3b8"}:d.t==="p"?{background:"rgba(139,92,246,0.2)",color:"#c4b5fd",border:"1px solid rgba(139,92,246,0.3)"}:{background:"rgba(255,255,255,0.03)",color:"#334155",border:"1px dashed rgba(255,255,255,0.12)",minWidth:36,textAlign:"center"})}}>{d.t==="b"?"___":d.w}</div>)}
+          {placed.length>0&&!dRes&&<button onClick={()=>{const l=placed[placed.length-1];setPlaced(placed.slice(0,-1));setBank(b=>[...b,l.word])}} style={{padding:"2px 5px",borderRadius:4,background:"rgba(239,68,68,0.12)",border:"none",color:"#fca5a5",fontSize:9,cursor:"pointer"}}>↩</button>}
+        </div>
+        {!dRes&&bank.length>0&&<div style={{marginTop:8}}>
+          <div style={{fontSize:8,color:"#64748b",marginBottom:4}}>👇 터치해서 순서대로</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {bank.map((w,i)=><button key={i} onClick={()=>tap(w,i)} style={{padding:"8px 12px",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer",background:wt===i?"rgba(239,68,68,0.2)":"rgba(139,92,246,0.12)",border:wt===i?"1px solid rgba(239,68,68,0.3)":"1px solid rgba(139,92,246,0.2)",color:wt===i?"#fca5a5":"#c4b5fd",transition:"all 0.2s",fontFamily:F}}>{w}</button>)}
+          </div>
+        </div>}
+      </>:<div style={{marginTop:8}}>
+        <p style={{fontSize:11,color:"#94a3b8",marginBottom:6}}>한글만 보고 전체 문장을 말하세요!</p>
+        {!lstn?<button onClick={()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR)return;const r=new SR();r.lang=tL;r.interimResults=false;r.onresult=e=>{const t=e.results[0][0].transcript;setTx(t);setDRes(chk(t,gT(dl))>=0.4?"pass":"retry");setLstn(false)};r.onerror=()=>setLstn(false);r.onend=()=>setLstn(false);recRef.current=r;setLstn(true);setTx("");r.start()}} style={{...S.nBtn,background:"rgba(245,158,11,0.2)",color:"#f59e0b"}}>🎤 말하기</button>
+        :<button onClick={()=>{if(recRef.current)recRef.current.stop()}} style={{...S.nBtn,background:"rgba(239,68,68,0.2)",color:"#fca5a5"}}>🔴 녹음중...</button>}
+        {tx&&<div style={{marginTop:4,fontSize:12,color:"#e2e8f0"}}>🎤 {tx}</div>}
+      </div>}
+      {dRes&&<div style={{border:"1px solid",borderColor:dRes==="pass"?"rgba(74,222,128,0.2)":"rgba(251,191,36,0.2)",background:dRes==="pass"?"rgba(74,222,128,0.05)":"rgba(251,191,36,0.05)",borderRadius:7,padding:7,marginTop:6}}>
+        <span style={{fontSize:12}}>{dRes==="pass"?"✅ 통과!":"🔄 다시!"}</span>
+        <div style={{fontSize:11,color:"#4ade80",marginTop:2}}>{gT(dl)}</div></div>}
+      {dRes==="pass"&&<button onClick={adv} style={{...S.nBtn,background:"linear-gradient(135deg,#8b5cf6,#6366f1)",marginTop:6}}>{dIdx<myDl.length-1?"다음 →":dLvl<4?`Lv.${dLvl+1} →`:"🎬 완료!"}</button>}
+      {dRes==="retry"&&<button onClick={()=>{const p=mkPuz(gT(dl),dLvl);setPuz(p);setPlaced([]);setBank([...p.bank]);setDRes(null);setWt(null);setTx("")}} style={{...S.nBtn,background:"rgba(251,191,36,0.12)",color:"#fbbf24",marginTop:6}}>🔄 다시</button>}
+      <button onClick={()=>say(gT(dl),tL,0.7)} style={{...S.nBtn,background:"rgba(96,165,250,0.12)",color:"#93c5fd",marginTop:4}}>🔊 듣기</button>
+    </div>}
+  </div>)}
+
+  // ═══ DRESS ═══
+  if(ph===PH.DRESS){const allV=[];if(sc)sc.dialogue.forEach(d=>{if(d.vocab)d.vocab.forEach(v=>{if(!allV.includes(v))allV.push(v)})});const dv=vl.length>0?vl:allV;
+    if(!sc)return(<div style={S.pg}><style>{CSS}</style><Nav/><div style={{textAlign:"center",padding:30}}><p style={{fontSize:12,color:"#64748b"}}>먼저 작품을 선택하세요!</p></div></div>);
+    if(vQ!==null&&dv.length>0&&vQ<dv.length){const parts=dv[vQ].split(":");const w=parts[0]||"";const m=parts[1]||"";
+      return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+        <div style={{...S.gTag,background:"#ec4899",marginBottom:8}}>💄 분장실 퀴즈</div>
+        <div style={S.drillCard}><p style={{fontSize:12,color:"#94a3b8",marginBottom:3}}>이 표현의 뜻은?</p>
+          <p style={{fontSize:20,fontWeight:700,color:"#fff",margin:"6px 0"}}>{w}</p>
+          <button onClick={()=>{setVS(c=>c+1);setVQ(vQ<dv.length-1?vQ+1:null)}} style={{...S.nBtn,background:"rgba(74,222,128,0.12)",color:"#4ade80",marginBottom:4}}>✅ {m} — 알아요!</button>
+          <button onClick={()=>setVQ(vQ<dv.length-1?vQ+1:null)} style={{...S.nBtn,background:"rgba(251,191,36,0.12)",color:"#fbbf24"}}>🔄 {m} — 몰랐어요</button>
+          <p style={{fontSize:8,color:"#475569",marginTop:4}}>{vQ+1}/{dv.length} · ✅{vS}</p></div></div>)}
+    return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+      <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:8}}><span style={{...S.gTag,background:"#ec4899"}}>💄 분장실</span><span style={{fontSize:10,color:"#94a3b8"}}>배우 암기노트</span></div>
+      {dv.length>0?<div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:10}}>
+          {dv.map((v,i)=>{const p=v.split(":");return<div key={i} style={{padding:"3px 7px",borderRadius:5,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.06)",fontSize:10}}>
+            <span style={{fontWeight:600,color:"#fff"}}>{p[0]}</span><span style={{color:"#64748b",marginLeft:3}}>{p[1]}</span></div>})}
+        </div>
+        <button onClick={()=>{setVQ(0);setVS(0)}} style={{...S.nBtn,background:"linear-gradient(135deg,#ec4899,#8b5cf6)"}}>🧠 퀴즈!</button>
+      </div>:<p style={{fontSize:11,color:"#475569",textAlign:"center",padding:16}}>촬영하면서 모아보세요!</p>}
+    </div>)}
+
+  // ═══ REHEARSAL & ACTION ═══
+  if(ph===PH.REHEARSAL||ph===PH.ACTION){const isR=ph===PH.REHEARSAL;const dl=sc.dialogue;
+    const cm=!isMe?sc.roles.find(r=>r.id===line.speaker):null;const myRO=sc.roles.find(r=>r.id===myR);
+    const spN=isMe?myRO.name:cm?.name,spE=isMe?myRO.emoji:cm?.emoji;const prog=((li+1)/dl.length)*100;
+    if(!isR&&hp<=0)return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+      <div style={{textAlign:"center",padding:"30px 0"}}><div style={{fontSize:44}}>🎬</div><h2 style={{fontSize:18,fontWeight:900,color:"#ef4444",margin:"6px 0"}}>NG! 촬영 중단!</h2>
+        <p style={{fontSize:12,color:"#94a3b8"}}>❤️ HP 소진</p>
+        <div style={{display:"flex",flexDirection:"column",gap:6,marginTop:12}}>
+          <button onClick={()=>setPh(PH.SCRIPT)} style={{...S.nBtn,background:"rgba(139,92,246,0.12)",color:"#c4b5fd"}}>📖 대본실</button>
+          <button onClick={()=>reset(PH.ACTION)} style={{...S.nBtn,background:`${sc.gColor}15`,color:sc.gColor}}>🎬 재촬영</button></div></div></div>);
+  return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+    <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:2}}>
+      <span style={{padding:"2px 6px",borderRadius:4,fontSize:9,fontWeight:700,color:"#fff",background:isR?"#3b82f6":sc.gColor}}>{isR?"🎭 리허설":"🎬 촬영"}</span>
+      <span style={{fontSize:10,fontWeight:600,color:"#cbd5e1",flex:1}}>{sc.title}</span>
+      <span style={{fontSize:9,color:"#475569"}}>{li+1}/{dl.length}</span></div>
+    <div style={{height:3,background:"rgba(255,255,255,0.04)",borderRadius:2,marginBottom:5,overflow:"hidden"}}><div style={{height:"100%",width:`${prog}%`,background:isR?"#3b82f6":sc.gColor,borderRadius:2,transition:"width 0.4s"}}/></div>
+    {!isR&&<div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+      <div style={{display:"flex",gap:2}}>{[1,2,3].map(i=><span key={i} style={{fontSize:14,opacity:i<=hp?1:0.2}}>❤️</span>)}</div>
+      {combo>0&&<span style={{fontSize:10,fontWeight:700,color:"#f59e0b",background:"rgba(245,158,11,0.12)",padding:"1px 6px",borderRadius:6}}>🔥x{combo}</span>}
+      <span style={{marginLeft:"auto",fontSize:9,color:"#64748b"}}>XP:{xp}</span></div>}
+    {/* Stage */}
+    <div style={{position:"relative",width:"100%",height:140,borderRadius:10,overflow:"hidden",marginBottom:4,border:"1px solid rgba(255,255,255,0.05)",background:sc.bg||"linear-gradient(180deg,#0f1020,#1a1a3e)"}}>
+      <div style={{position:"absolute",bottom:10,left:0,right:0,display:"flex",justifyContent:"space-around",alignItems:"flex-end",padding:"0 12px",zIndex:5}}>
+        {sc.roles.map(role=>{const isSp=spkId===role.id;const isAct=line.speaker===role.id;const isMn=role.id===myR;
+          return(<div key={role.id} style={{display:"flex",flexDirection:"column",alignItems:"center",transition:"all 0.4s",transform:isSp?"scale(1.2) translateY(-10px)":isAct?"scale(1.05)":"scale(0.85)",filter:isAct?"none":"brightness(0.4)"}}>
+            <div style={{fontSize:40,animation:isSp?"cb 0.5s ease infinite":"none"}}>{role.emoji}</div>
+            <div style={{fontSize:7,fontWeight:600,color:"#fff",padding:"1px 5px",borderRadius:4,marginTop:2,background:isMn?`${sc.gColor}dd`:"rgba(0,0,0,0.7)"}}>{role.name}{isMn?" (나)":""}</div>
+          </div>)})}
+      </div>
+      {line.act&&<div style={{position:"absolute",bottom:0,left:0,right:0,padding:"3px 8px",background:"rgba(0,0,0,0.7)",fontSize:8,color:"#94a3b8",fontStyle:"italic",zIndex:6}}>🎬 {spN} — {line.act}</div>}
+    </div>
+    {/* Chat */}
+    {hist.length>0&&<div style={{display:"flex",flexDirection:"column",gap:2,marginBottom:4,maxHeight:60,overflowY:"auto"}}>
+      {hist.slice(-2).map((h,i)=>{const mine=h.speaker===myR;const r=sc.roles.find(ro=>ro.id===h.speaker);
+        return(<div key={i} style={{display:"flex",alignItems:"flex-end",gap:3,justifyContent:mine?"flex-end":"flex-start"}}>
+          {!mine&&<span style={{fontSize:11}}>{r?.emoji}</span>}
+          <div style={{padding:"3px 7px",maxWidth:"80%",background:mine?`${sc.gColor}12`:"rgba(255,255,255,0.04)",borderRadius:mine?"8px 8px 2px 8px":"8px 8px 8px 2px"}}>
+            <span style={{fontSize:10,color:"#cbd5e1"}}>{gT(h)}</span></div>
+          {mine&&<span style={{fontSize:11}}>{r?.emoji}</span>}
+        </div>)})}<div ref={chatRef}/></div>}
+    {/* Panel */}
+    <div style={S.panel}><div style={{display:"flex",alignItems:"center",gap:5,marginBottom:6}}>
+      <span style={{fontSize:18}}>{spE}</span><span style={{fontSize:11,fontWeight:700,color:"#fff",flex:1}}>{spN}</span>
+      {isMe?<span style={{fontSize:8,fontWeight:700,padding:"2px 6px",borderRadius:4,background:`${sc.gColor}20`,color:sc.gColor}}>🎤 MY LINE</span>
+      :<span style={{fontSize:8,fontWeight:700,padding:"2px 6px",borderRadius:4,background:"rgba(96,165,250,0.12)",color:"#60a5fa"}}>LISTEN</span>}</div>
+    <div style={{background:"rgba(0,0,0,0.2)",borderRadius:7,padding:8,marginBottom:6,minHeight:30}}>
+      {!isMe?<>{(rev>=1||isR)?<p style={{fontSize:13,fontWeight:500,color:"#fff",margin:"0 0 1px",lineHeight:1.4}}>{gT(line)}</p>:<p style={{fontSize:11,color:"#475569",margin:0,textAlign:"center"}}>🔊 들어보세요</p>}
+        {(rev>=2||isR)&&<p style={{fontSize:10,color:"#94a3b8",margin:0}}>{gN(line)}</p>}</>
+      :<>{isR?<><p style={{fontSize:12,color:"#fff",opacity:0.5,margin:"0 0 1px"}}>💡 {gT(line)}</p><p style={{fontSize:10,color:"#94a3b8",margin:0}}>{gN(line)}</p></>
+      :<>{rev>=2?<><p style={{fontSize:13,color:"#fff",margin:"0 0 1px"}}>{gT(line)}</p><p style={{fontSize:10,color:"#94a3b8",margin:0}}>{gN(line)}</p></>:rev>=1?<p style={{fontSize:10,color:"#94a3b8",margin:0}}>💡 {gN(line)}</p>:<p style={{fontSize:11,color:"#475569",margin:0,textAlign:"center"}}>💬 대사!</p>}</>}</>}
+    </div>
+    {showTx&&isMe&&<div style={{border:"1px solid",borderColor:ms>=0.4?"rgba(74,222,128,0.2)":"rgba(251,191,36,0.2)",background:ms>=0.4?"rgba(74,222,128,0.05)":"rgba(251,191,36,0.05)",borderRadius:6,padding:6,marginBottom:5}}>
+      <span style={{fontSize:11}}>{ms>=0.4?"✅":"🎬 NG!"}</span><span style={{fontSize:10,fontWeight:700,color:ms>=0.4?"#4ade80":"#fbbf24",marginLeft:4}}>{ms>=0.4?`${u.pass} ${combo>1?`🔥x${combo}`:""}`:"Director: Retake!"}</span>
+      <div style={{fontSize:9,color:"#94a3b8",marginTop:2}}>🎤 내가 말한 것: {tx}</div>
+      <div style={{fontSize:9,color:"#4ade80",marginTop:1}}>📜 대본: {gT(line)}</div>
+      {/* Audio playback buttons */}
+      <div style={{display:"flex",gap:4,marginTop:5}}>
+        {audioUrl&&<button onClick={()=>{const a=new Audio(audioUrl);a.play()}} style={{padding:"4px 8px",borderRadius:5,background:"rgba(245,158,11,0.12)",border:"none",color:"#fcd34d",fontSize:9,cursor:"pointer",fontFamily:F}}>🔊 내 녹음 듣기</button>}
+        <button onClick={()=>say(gT(line),tL,0.8)} style={{padding:"4px 8px",borderRadius:5,background:"rgba(96,165,250,0.12)",border:"none",color:"#93c5fd",fontSize:9,cursor:"pointer",fontFamily:F}}>🔊 원어민 듣기</button>
+      </div>
+      {/* Director tips */}
+      {dirTips.length>0&&<div style={{marginTop:5,padding:"5px 7px",background:"rgba(245,158,11,0.06)",borderRadius:5,border:"1px solid rgba(245,158,11,0.1)"}}>
+        <div style={{fontSize:9,fontWeight:700,color:"#f59e0b",marginBottom:3}}>🎥 감독 피드백</div>
+        {dirTips.map((tip,i)=><div key={i} style={{fontSize:9,color:tip.type==="good"?"#4ade80":"#e2e8f0",marginBottom:2}}>
+          {tip.type==="good"?"👍":"✏️"} {tip.msg} — <span style={{color:"#94a3b8"}}>{tip.fix}</span>
+        </div>)}
+      </div>}
+    </div>}
+    <div style={{display:"flex",gap:4,marginBottom:5}}>
+      {!isMe?<>
+        <button disabled={playing} onClick={async()=>{setPlay(true);setSpkId(line.speaker);await say(gT(line),tL,0.8);setPlay(false);setSpkId(null);if(rev<1)setRev(1)}} style={{...S.btn,...S.btnL,opacity:playing?0.5:1}}>{playing?"🔊...":`🔊 ${u.listen}`}</button>
+        {!isR&&rev<1&&<button onClick={()=>{setRev(1);setPeeks(c=>c+1)}} style={{...S.btn,...S.btnH}}>👀</button>}
+        {!isR&&rev===1&&<button onClick={()=>setRev(2)} style={{...S.btn,...S.btnH}}>🇰🇷</button>}
+      </>:<>
+        {!lstn?<button onClick={()=>{startSTT();setSpkId(myR)}} style={{...S.btn,background:`${sc.gColor}20`,color:sc.gColor}}>🎤 {u.myLine}</button>
+        :<button onClick={()=>{if(recRef.current)recRef.current.stop();if(mediaRecRef.current&&mediaRecRef.current.state==="recording")mediaRecRef.current.stop();setSpkId(null);setTimerOn(false)}} style={{...S.btn,background:"rgba(239,68,68,0.12)",color:"#fca5a5"}}>🔴 {u.record}</button>}
+        {!isR&&rev<1&&<button onClick={()=>{setRev(1);setPeeks(c=>c+1);setHp(h=>h-1)}} style={{...S.btn,...S.btnH}}>💡-❤️</button>}
+        {!isR&&rev===1&&<button onClick={()=>{setRev(2);setPeeks(c=>c+1)}} style={{...S.btn,...S.btnH}}>🔤</button>}
+      </>}
+    </div>
+    <button onClick={nextLine} style={{...S.nBtn,background:`linear-gradient(135deg,${sc.gColor},${sc.gColor}bb)`}}>{li<dl.length-1?u.next:`🎬 ${u.cut}`}</button>
+    </div>
+  </div>)}
+
+  // ═══ RESULT ═══
+  if(ph===PH.RESULT){const myRO=sc.roles.find(r=>r.id===myR);const myLn=hist.filter(h=>h.speaker===myR);const passed=myLn.filter(h=>h.ms>=0.4).length;
+  return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+    <div style={{textAlign:"center",padding:"12px 0 6px"}}><div style={{fontSize:40}}>🎬</div><h2 style={{fontSize:18,fontWeight:900,color:"#fff",margin:"4px 0"}}>{u.done}</h2>
+      <p style={{fontSize:11,color:"#94a3b8"}}>{sc.title} — {myRO.emoji} {myRO.name}</p></div>
+    <div style={S.resC}>
+      <div style={S.resS}><span>✅ 통과</span><span style={{fontWeight:700,color:"#4ade80"}}>{passed}/{myLn.length}</span></div>
+      <div style={S.resS}><span>🔥 콤보</span><span style={{fontWeight:700,color:"#f59e0b"}}>{maxC}</span></div>
+      <div style={S.resS}><span>⭐ XP</span><span style={{fontWeight:700,color:"#fff"}}>{xp}</span></div>
+      <div style={S.resS}><span>💄 단어</span><span style={{fontWeight:700,color:"#ec4899"}}>{vl.length}</span></div>
+    </div>
+    {mastery.length>0&&<div style={{display:"flex",gap:6,margin:"6px 0"}}>
+      {["green","yellow","red"].map(g=><div key={g} style={{flex:1,textAlign:"center",padding:5,borderRadius:6,background:`rgba(255,255,255,0.03)`}}>
+        <div style={{fontSize:14}}>{g==="green"?"🟢":g==="yellow"?"🟡":"🔴"}</div>
+        <div style={{fontSize:14,fontWeight:800,color:g==="green"?"#4ade80":g==="yellow"?"#fbbf24":"#ef4444"}}>{mastery.filter(m=>m.grade===g).length}</div>
+      </div>)}
+    </div>}
+    <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:8}}>
+      <button onClick={()=>setPh(PH.SCRIPT)} style={{...S.resBtn,background:"rgba(139,92,246,0.12)"}}>📖 대본</button>
+      <button onClick={()=>setPh(PH.DRESS)} style={{...S.resBtn,background:"rgba(236,72,153,0.12)"}}>💄 분장실</button>
+      <button onClick={()=>reset(PH.REHEARSAL)} style={{...S.resBtn,background:"rgba(59,130,246,0.1)"}}>🎭 리허설</button>
+      <button onClick={()=>reset(PH.ACTION)} style={{...S.resBtn,background:`${sc.gColor}12`}}>🎬 재촬영</button>
+    </div>
+    <button onClick={()=>setPh(PH.STUDIO)} style={{...S.nBtn,background:"rgba(255,255,255,0.04)",marginTop:6,color:"#94a3b8"}}>🎬 스튜디오</button>
+  </div>)}
+
+  // ═══ PRO LISTENING ═══
+  if(ph===PH.PRO_LISTEN){const pl=sc.proListening;const isPres=proPhase==="pres";
+    const text=isPres?(pl.pres[tK]||pl.pres.en):(pl.ques[tK]||pl.ques.en);
+    const textHint=isPres?(pl.pres[nK]||pl.pres.ko):(pl.ques[nK]||pl.ques.ko);
+    const plTitle=pl.title[nK]||pl.title.ko;
+  return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+    <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",background:"rgba(59,130,246,0.08)",borderRadius:8,marginBottom:8}}>
+      <span style={{fontSize:9,fontWeight:700,color:"#3b82f6",letterSpacing:1}}>{isPres?"🎤":"❓"}</span>
+      <span style={{fontSize:10,color:"#94a3b8"}}>{plTitle}</span></div>
+    <div style={{position:"relative",width:"100%",height:130,borderRadius:10,overflow:"hidden",marginBottom:6,background:isPres?"linear-gradient(180deg,#0f1020,#1a1a3e)":"linear-gradient(180deg,#1a0a0a,#2e1515)",display:"flex",alignItems:"center",justifyContent:"center",border:"1px solid rgba(255,255,255,0.05)"}}>
+      <div style={{textAlign:"center"}}><span style={{fontSize:36}}>{isPres?"🎤":"🙋"}</span>
+        <div style={{fontSize:10,color:"#94a3b8",marginTop:2}}>{isPres?"발표자":"청중이 질문"}</div>
+        {playing&&<div style={{display:"flex",gap:2,justifyContent:"center",marginTop:4,height:18,alignItems:"flex-end"}}>
+          {[0,1,2,3,4].map(i=><div key={i} style={{width:3,borderRadius:2,background:sc.gColor,animation:`sb 0.4s ${i*0.08}s ease-in-out infinite alternate`}}/>)}</div>}
+      </div></div>
+    <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 8px",background:"rgba(255,255,255,0.03)",borderRadius:7,marginBottom:6}}>
+      <button onClick={()=>setSpeed(s=>Math.max(0.5,s-0.1))} style={S.spBtn}>🐢</button>
+      <span style={{fontSize:11,color:"#fff",fontWeight:700}}>×{speed.toFixed(1)}</span>
+      <button onClick={()=>setSpeed(s=>Math.min(1.2,s+0.1))} style={S.spBtn}>🐇</button>
+      <span style={{fontSize:9,color:"#475569",marginLeft:"auto"}}>리플레이: {replays}회</span></div>
+    {showSc&&<div style={S.scriptBox}><p style={{fontSize:12,color:"#fff",lineHeight:1.5,margin:"0 0 4px"}}>{text}</p><p style={{fontSize:10,color:"#64748b",margin:0}}>{textHint}</p></div>}
+    <div style={{display:"flex",flexDirection:"column",gap:5}}>
+      <button disabled={playing} onClick={async()=>{setPlay(true);await say(text,tL,speed);setPlay(false);setReplays(c=>c+1)}} style={{...S.nBtn,background:`linear-gradient(135deg,${sc.gColor},${sc.gColor}bb)`,opacity:playing?0.5:1}}>{playing?"🔊 재생중...":replays===0?"🔊 들어보세요":"🔄 다시 듣기"}</button>
+      {replays>0&&!showSc&&<button onClick={()=>{setShowSc(true);if(pl.vocab)setVl(v=>{const n=[...v];pl.vocab.forEach(x=>{if(!n.includes(x))n.push(x)});return n})}} style={{...S.nBtn,background:"rgba(255,255,255,0.05)",color:"#94a3b8"}}>👀 스크립트 (포기)</button>}
+      {replays>0&&<button onClick={()=>{if(isPres){setProPhase("question");setReplays(0);setShowSc(false)}else{setPqIdx(0);setPqSel(null);setPqRes(null);setPqAnswers([]);setPh(PH.PRO_QUIZ)}}} style={{...S.nBtn,background:"rgba(74,222,128,0.12)",color:"#4ade80"}}>{isPres?"알아들었어요! → 질문":"알아들었어요! → 퀴즈"}</button>}
+    </div>
+  </div>)}
+
+  // ═══ PRO QUIZ ═══
+  if(ph===PH.PRO_QUIZ){const pl=sc.proListening;const qData=pl.quiz[pqIdx];
+    const qText=qData.q[nK]||qData.q.ko;const qOpts=qData.opts[nK]||qData.opts.ko;
+  return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+    <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 8px",background:"rgba(139,92,246,0.08)",borderRadius:7,marginBottom:8}}>
+      <span style={{fontSize:9,fontWeight:700,color:"#8b5cf6"}}>📝</span><span style={{fontSize:10,color:"#94a3b8"}}>{pqIdx+1}/{pl.quiz.length}</span></div>
+    <div style={S.drillCard}><p style={{fontSize:14,fontWeight:600,color:"#fff",margin:"0 0 10px"}}>{qText}</p>
+      {qOpts.map((opt,i)=>{const isSel=pqSel===i;const isOk=pqRes!==null&&i===qData.ans;const isWr=pqRes!==null&&isSel&&i!==qData.ans;
+        return(<button key={i} onClick={()=>{if(pqRes!==null)return;setPqSel(i);setPqRes(i===qData.ans?"pass":"fail");setPqAnswers(a=>[...a,{pass:i===qData.ans}])}}
+          style={{display:"block",width:"100%",padding:"10px 12px",marginBottom:6,borderRadius:8,border:"1px solid",fontSize:12,fontWeight:500,cursor:"pointer",textAlign:"left",fontFamily:F,
+            background:isOk?"rgba(74,222,128,0.12)":isWr?"rgba(239,68,68,0.12)":"rgba(255,255,255,0.03)",
+            borderColor:isOk?"rgba(74,222,128,0.3)":isWr?"rgba(239,68,68,0.3)":"rgba(255,255,255,0.08)",
+            color:isOk?"#4ade80":isWr?"#ef4444":"#e2e8f0"}}>{isOk?"✅ ":""}{isWr?"❌ ":""}{opt}</button>)})}
+    </div>
+    {pqRes&&<div style={{marginTop:6}}>
+      <button onClick={()=>{if(pqIdx<pl.quiz.length-1){setPqIdx(c=>c+1);setPqSel(null);setPqRes(null)}else setPh(PH.PRO_RESULT)}} style={{...S.nBtn,background:`linear-gradient(135deg,${sc.gColor},${sc.gColor}bb)`}}>{pqIdx<pl.quiz.length-1?"다음 →":"📊 결과"}</button>
+      {pqRes==="fail"&&<button onClick={()=>{setProPhase("pres");setReplays(0);setShowSc(false);setPh(PH.PRO_LISTEN)}} style={{...S.nBtn,background:"rgba(255,255,255,0.05)",color:"#94a3b8",marginTop:4}}>🔄 다시 듣기</button>}
+    </div>}
+  </div>)}
+
+  // ═══ PRO RESULT ═══
+  if(ph===PH.PRO_RESULT){const pl=sc.proListening;const correct=pqAnswers.filter(a=>a.pass).length;const plTitle2=pl.title[nK]||pl.title.ko;
+  return(<div style={S.pg}><style>{CSS}</style><Nav all/>
+    <div style={{textAlign:"center",padding:"14px 0 8px"}}><div style={{fontSize:40}}>🎧</div><h2 style={{fontSize:18,fontWeight:900,color:"#fff",margin:"4px 0"}}>{u.done}</h2>
+      <p style={{fontSize:11,color:"#94a3b8"}}>{sc.genre} — {plTitle2}</p></div>
+    <div style={S.resC}>
+      <div style={S.resS}><span>📝 퀴즈</span><span style={{fontWeight:700,color:correct===pl.quiz.length?"#4ade80":"#fbbf24"}}>{correct}/{pl.quiz.length}</span></div>
+      <div style={S.resS}><span>🔄 리플레이</span><span style={{fontWeight:700,color:"#fff"}}>{replays}회</span></div>
+      <div style={S.resS}><span>💄 단어</span><span style={{fontWeight:700,color:"#ec4899"}}>{vl.length}</span></div>
+    </div>
+    {pl.vocab&&<div style={{display:"flex",flexWrap:"wrap",gap:4,margin:"6px 0"}}>
+      {pl.vocab.map((v,i)=>{const p=v.split(":");return<div key={i} style={{padding:"3px 6px",borderRadius:5,background:"rgba(255,255,255,0.04)",fontSize:10}}>
+        <span style={{fontWeight:600,color:"#fff"}}>{p[0]}</span><span style={{color:"#64748b",marginLeft:3}}>{p[1]}</span></div>})}
+    </div>}
+    <div style={{display:"flex",gap:5,marginTop:8}}>
+      <button onClick={()=>{setProPhase("pres");setReplays(0);setShowSc(false);setPqIdx(0);setPqSel(null);setPqRes(null);setPqAnswers([]);setPh(PH.PRO_LISTEN)}} style={{...S.resBtn,background:"rgba(59,130,246,0.12)"}}>🔄 다시</button>
+      <button onClick={()=>setPh(PH.ROLE)} style={{...S.resBtn,background:"rgba(139,92,246,0.12)"}}>🎭 배역</button>
+      <button onClick={()=>setPh(PH.STUDIO)} style={{...S.resBtn,background:"rgba(255,255,255,0.05)"}}>🎬 스튜디오</button>
+    </div>
+  </div>)}
+
+  return null;
+}
+
+const CSS=`@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700;800;900&family=Playfair+Display:wght@700;800;900&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+@keyframes fu{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}.fu{animation:fu .4s ease both}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes cb{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+@keyframes sb{from{height:3px}to{height:16px}}
+@keyframes float{0%{transform:translateY(0)}100%{transform:translateY(-8px)}}
+@keyframes flicker{0%,100%{opacity:.03}50%{opacity:.06}}`;
+const N={bar:{display:"flex",alignItems:"center",gap:3,padding:"4px 0 6px",borderBottom:"1px solid rgba(255,255,255,0.04)",marginBottom:6},
+  btn:{display:"flex",alignItems:"center",gap:2,background:"none",border:"none",color:"#94a3b8",cursor:"pointer",padding:"3px 6px",borderRadius:5,fontSize:9,fontFamily:F},
+  t:{fontSize:9,fontWeight:600}};
+const S={
+  pg:{maxWidth:480,margin:"0 auto",minHeight:"100vh",padding:"8px 12px 70px",fontFamily:F,background:"#06060c",color:"#e2e8f0"},
+  introW:{position:"relative",minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center"},
+  grain:{position:"fixed",inset:0,background:"repeating-linear-gradient(0deg,rgba(255,255,255,.03) 0px,transparent 2px)",pointerEvents:"none",animation:"flicker 3s infinite",zIndex:1},
+  lT:{position:"fixed",top:0,left:0,right:0,height:28,background:"#000",zIndex:2},lB:{position:"fixed",bottom:0,left:0,right:0,height:28,background:"#000",zIndex:2},
+  logo:{fontFamily:"'Playfair Display',serif",fontSize:32,fontWeight:900,background:"linear-gradient(135deg,#f59e0b,#ef4444,#f59e0b)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",margin:"4px 0"},
+  introBtn:{marginTop:8,padding:"11px 24px",borderRadius:10,border:"1px solid rgba(245,158,11,.3)",background:"rgba(245,158,11,.1)",color:"#f59e0b",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:F},
+  bk:{background:"none",border:"none",color:"#f59e0b",fontSize:11,cursor:"pointer",padding:"4px 0",fontFamily:F},
+  natCard:{display:"flex",flexDirection:"column",alignItems:"center",gap:2,padding:"12px 4px",background:"rgba(255,255,255,.02)",border:"1px solid",borderRadius:12,cursor:"pointer",color:"#e2e8f0"},
+  destCard:{display:"flex",alignItems:"center",gap:10,padding:"14px",background:"rgba(255,255,255,.02)",border:"1px solid",borderRadius:12,cursor:"pointer",color:"#e2e8f0"},
+  card:{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.06)",borderRadius:10,padding:10},
+  tabBtn:{flex:1,padding:"8px",borderRadius:8,border:"none",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:F},
+  scCard:{display:"block",width:"100%",background:"rgba(255,255,255,.02)",border:"1px solid",borderRadius:11,padding:10,textAlign:"left",cursor:"pointer",color:"#e2e8f0"},
+  gTag:{display:"inline-block",padding:"2px 7px",borderRadius:4,fontSize:9,fontWeight:800,color:"#06060c"},
+  roleBtn:{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:"rgba(255,255,255,.03)",border:"1px solid",borderRadius:10,cursor:"pointer",color:"#e2e8f0",width:"100%"},
+  cover:{textAlign:"center",padding:"10px",margin:"2px 0 6px",background:"rgba(255,255,255,.02)",border:"1px solid",borderRadius:10},
+  sLine:{padding:"5px 7px",marginBottom:3,borderLeft:"2px solid",borderRadius:"0 5px 5px 0",background:"rgba(255,255,255,.02)"},
+  mini:{background:"rgba(96,165,250,.1)",border:"none",color:"#60a5fa",fontSize:9,padding:"1px 4px",borderRadius:3,cursor:"pointer",marginLeft:"auto"},
+  drillCard:{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.06)",borderRadius:10,padding:10},
+  panel:{background:"rgba(255,255,255,.025)",border:"1px solid rgba(255,255,255,.05)",borderRadius:12,padding:10},
+  btn:{flex:1,padding:"8px 3px",borderRadius:7,border:"none",fontSize:10,fontWeight:600,cursor:"pointer",fontFamily:F},
+  btnL:{background:"rgba(96,165,250,.12)",color:"#93c5fd"},btnH:{background:"rgba(255,255,255,.04)",color:"#64748b"},
+  nBtn:{width:"100%",padding:"10px",borderRadius:8,border:"none",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:F},
+  resC:{background:"rgba(255,255,255,.025)",border:"1px solid rgba(255,255,255,.05)",borderRadius:10,padding:10,margin:"6px 0"},
+  resS:{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid rgba(255,255,255,.03)",fontSize:11,color:"#94a3b8"},
+  resBtn:{flex:1,padding:"9px",borderRadius:8,border:"none",color:"#e2e8f0",fontSize:10,fontWeight:600,cursor:"pointer",fontFamily:F},
+  scriptBox:{background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.06)",borderRadius:8,padding:10,marginBottom:6},
+  spBtn:{padding:"3px 8px",borderRadius:5,background:"rgba(255,255,255,.06)",border:"none",color:"#94a3b8",fontSize:10,cursor:"pointer",fontFamily:F},
+};
+
+    // Render
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+    // Hide loading
+    document.getElementById('loading').style.display = 'none';
+  </script>
+</body>
+</html>
